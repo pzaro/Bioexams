@@ -4,122 +4,105 @@ import pandas as pd
 import re
 import io
 
-# --- ΡΥΘΜΙΣΕΙΣ ---
-st.set_page_config(page_title="Lab Results Scanner", layout="wide")
-st.title("🔬 Εξαγωγή Εξετάσεων (Έκδοση Σαρωτής)")
-st.markdown("Αυτή η έκδοση καθαρίζει 'κρυφούς' χαρακτήρες (όπως \", $, *) που εμποδίζουν την ανάγνωση.")
-
-# --- Η ΣΥΝΑΡΤΗΣΗ ΚΑΘΑΡΙΣΜΟΥ ΚΑΙ ΕΥΡΕΣΗΣ ---
-def aggressive_extract(text, keywords):
-    # 1. Καθαρισμός "θορύβου" από το PDF (με βάση τα δείγματα που είδαμε)
-    # Αντικαθιστούμε εισαγωγικά, δολάρια, αστερίσκους και κάθετες γραμμές με κενά
-    clean_text = text.replace('"', ' ').replace('$', ' ').replace('*', ' ').replace('|', ' ')
-    
-    # 2. Αντικατάσταση πολλαπλών κενών με ένα
-    clean_text = re.sub(r'\s+', ' ', clean_text)
-
-    for key in keywords:
-        # Ψάχνουμε τη λέξη κλειδί (αδιαφορώντας για κεφαλαία/μικρά)
-        # και παίρνουμε τα επόμενα 50 ψηφία κειμένου
-        match = re.search(f"(?i){key}.{{0,50}}", clean_text)
-        
-        if match:
-            found_chunk = match.group(0)
-            
-            # 3. Ψάχνουμε για ΑΡΙΘΜΟ μέσα σε αυτό το κομμάτι
-            # Ο αριθμός μπορεί να είναι ακέραιος (150) ή δεκαδικός (12,5 ή 12.5)
-            # Αγνοούμε αριθμούς που μοιάζουν με ημερομηνίες ή κωδικούς (π.χ. μεγάλα νούμερα)
-            numbers = re.findall(r"(\d+[,.]?\d*)", found_chunk)
-            
-            for num_str in numbers:
-                # Μετατροπή σε float
-                val_clean = num_str.replace(',', '.')
-                try:
-                    value = float(val_clean)
-                    
-                    # Φίλτρα Λογικής (για να μην πιάσει π.χ. το έτος 2024 αντί για τα αιμοπετάλια)
-                    # Αν ψάχνουμε αιμοπετάλια και βρούμε αριθμό < 10, μάλλον είναι λάθος, πάμε στον επόμενο
-                    if "PLT" in key and value < 10: 
-                        continue 
-                        
-                    return value
-                except ValueError:
-                    continue
-    return None
+st.set_page_config(page_title="Ultimate Extractor", layout="wide")
+st.title("🛠️ Εργαλείο Εξαγωγής & Debugging")
+st.markdown("Αν δεν βλέπετε αποτελέσματα, κοιτάξτε το 'Raw Text' παρακάτω για να δείτε αν το αρχείο διαβάζεται σωστά.")
 
 def extract_date(text, filename):
-    # Καθαρισμός για να βρούμε την ημερομηνία πιο εύκολα
-    clean_text = text.replace('"', ' ').replace('Ημ/νία:', ' ').replace('Date:', ' ')
-    
-    match = re.search(r'(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})', clean_text)
-    if match:
-        day, month, year = match.groups()
-        if len(year) == 2: year = "20" + year
-        return f"{day}/{month}/{year}"
-    
-    # Αν δεν βρεθεί στο κείμενο, ψάχνουμε στο όνομα αρχείου
+    match = re.search(r'(\d{1,2}/\d{1,2}/\d{2,4})', text)
+    if match: return match.group(1)
     match_file = re.search(r'[-_](\d{6})', filename)
     if match_file:
         d = match_file.group(1)
         return f"{d[4:6]}/{d[2:4]}/20{d[0:2]}"
     return "Άγνωστη"
 
-# --- UPLOAD ---
-uploaded_files = st.file_uploader("📂 Ανεβάστε τα PDF αρχεία σας", type="pdf", accept_multiple_files=True)
+def get_value_from_tokens(text, keywords):
+    """
+    Μέθοδος για αρχεία που έχουν μορφή CSV μέσα στο PDF
+    π.χ. "PLT Αιμοπετάλια","400","..."
+    """
+    # 1. Αντικαθιστούμε τα διαχωριστικά "," με ένα ειδικό σύμβολο (π.χ. |)
+    # για να ξέρουμε πού αλλάζει το κελί
+    cleaner_text = text.replace('","', '|')
+    cleaner_text = cleaner_text.replace('", "', '|') # Με κενό
+    
+    # 2. Σπάμε το κείμενο σε κομμάτια (tokens)
+    tokens = cleaner_text.split('|')
+    
+    for i, token in enumerate(tokens):
+        # Καθαρίζουμε το token από σκουπίδια
+        clean_token = token.replace('"', '').replace('\n', '').strip()
+        
+        # Ελέγχουμε αν αυτό το token περιέχει τη λέξη κλειδί (π.χ. PLT)
+        for key in keywords:
+            if key.upper() in clean_token.upper():
+                # ΑΝ ΒΡΕΘΗΚΕ: Κοιτάμε το ΑΜΕΣΩΣ επόμενο token (που λογικά είναι η τιμή)
+                if i + 1 < len(tokens):
+                    next_token = tokens[i+1]
+                    # Καθαρίζουμε την τιμή (βγάζουμε $, *, κενά)
+                    value_str = next_token.replace('$', '').replace('*', '').replace('"', '').strip()
+                    value_str = value_str.replace(',', '.') # 12,5 -> 12.5
+                    
+                    # Προσπάθεια μετατροπής σε αριθμό
+                    try:
+                        # Ψάχνουμε για αριθμό μέσα στο string (π.χ. αν λέει "Low 45")
+                        num_match = re.search(r"(\d+[.]?\d*)", value_str)
+                        if num_match:
+                            return float(num_match.group(1))
+                    except:
+                        continue
+    return None
 
-# --- ΕΠΙΛΟΓΕΣ ---
+# --- UPLOAD ---
+uploaded_files = st.file_uploader("📂 Ανεβάστε τα PDF εδώ", type="pdf", accept_multiple_files=True)
+
 metrics_config = {
-    "Αιμοπετάλια (PLT)": ["PLT", "Αιμοπετάλια", "Platelets"],
-    "Αιμοσφαιρίνη (HGB)": ["HGB", "Αιμοσφαιρίνη", "Hemoglobin"],
-    "Λευκά Αιμοσφαίρια (WBC)": ["WBC", "Λευκά", "White Blood"],
-    "Σάκχαρο": ["Σάκχαρο", "Glucose", "GLU"],
+    "Αιμοπετάλια (PLT)": ["PLT", "Αιμοπετάλια"],
+    "Αιμοσφαιρίνη (HGB)": ["HGB", "Αιμοσφαιρίνη"],
+    "Λευκά (WBC)": ["WBC", "Λευκά"],
+    "Σάκχαρο": ["Σάκχαρο", "Glucose"],
     "Χοληστερίνη": ["Χοληστερίνη", "Cholesterol"],
-    "Τριγλυκερίδια": ["Τριγλυκερίδια", "Triglycerides"],
     "Σίδηρος": ["Σίδηρος", "Fe "],
-    "Φερριτίνη": ["Φερριτίνη", "Ferritin"],
-    "B12": ["B12", "Vit B12"],
-    "TSH": ["TSH", "Θυρεοειδοτρόπος"]
+    "B12": ["B12"],
+    "TSH": ["TSH"]
 }
 
-selected_metrics = st.multiselect("Επιλέξτε Εξετάσεις:", list(metrics_config.keys()), default=["Αιμοπετάλια (PLT)"])
+selected_metrics = st.multiselect("Επιλογή Εξετάσεων:", list(metrics_config.keys()), default=list(metrics_config.keys())[:3])
 
-# --- ΕΚΤΕΛΕΣΗ ---
-if st.button("🚀 ΕΞΑΓΩΓΗ") and uploaded_files:
+if st.button("🚀 ΤΡΕΞΕ ΤΟΝ ΚΩΔΙΚΑ") and uploaded_files:
     results = []
-    progress = st.progress(0)
     
-    for i, file in enumerate(uploaded_files):
-        try:
-            with pdfplumber.open(file) as pdf:
-                text = ""
-                for page in pdf.pages:
-                    text += (page.extract_text() or "") + " "
-            
-            row = {'Αρχείο': file.name, 'Ημερομηνία': extract_date(text, file.name)}
-            
-            for metric in selected_metrics:
-                val = aggressive_extract(text, metrics_config[metric])
-                row[metric] = val
-            
-            results.append(row)
-            
-        except Exception as e:
-            st.error(f"Error in {file.name}: {e}")
+    for uploaded_file in uploaded_files:
+        with pdfplumber.open(uploaded_file) as pdf:
+            full_text = ""
+            for page in pdf.pages:
+                full_text += page.extract_text() or ""
         
-        progress.progress((i + 1) / len(uploaded_files))
+        # --- DEBUG VIEW ΓΙΑ ΤΟΝ ΧΡΗΣΤΗ ---
+        with st.expander(f"🔍 Debug: Τι βλέπω στο αρχείο {uploaded_file.name}"):
+            st.text(full_text[:500]) # Δείξε τους πρώτους 500 χαρακτήρες
+            if len(full_text) < 50:
+                st.error("⚠️ ΤΟ ΚΕΙΜΕΝΟ ΕΙΝΑΙ ΚΕΝΟ! Το PDF είναι πιθανώς σκαναρισμένη εικόνα.")
+
+        row = {'Αρχείο': uploaded_file.name, 'Ημερομηνία': extract_date(full_text, uploaded_file.name)}
+        
+        for metric in selected_metrics:
+            val = get_value_from_tokens(full_text, metrics_config[metric])
+            row[metric] = val
+            
+        results.append(row)
 
     if results:
         df = pd.DataFrame(results)
-        # Ταξινόμηση
-        df['Date_Obj'] = pd.to_datetime(df['Ημερομηνία'], dayfirst=True, errors='coerce')
-        df = df.sort_values('Date_Obj').drop(columns=['Date_Obj'])
         
-        st.write("### Αποτελέσματα:")
+        # Format Date
+        df['Ημερομηνία'] = pd.to_datetime(df['Ημερομηνία'], dayfirst=True, errors='coerce').dt.strftime('%d/%m/%Y')
+        
+        st.write("### 📊 Αποτελέσματα")
         st.dataframe(df)
         
-        # Download
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df.to_excel(writer, index=False)
-        
-        st.download_button("📥 Κατέβασμα Excel", data=output.getvalue(), file_name="results.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        st.download_button("📥 Κατέβασμα Excel", data=output.getvalue(), file_name="results_debug.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
