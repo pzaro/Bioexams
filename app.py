@@ -4,146 +4,122 @@ import pandas as pd
 import re
 import io
 
-# --- ΡΥΘΜΙΣΕΙΣ ΣΕΛΙΔΑΣ ---
-st.set_page_config(page_title="Smart Medical Extractor", layout="wide")
-st.title("🩺 Έξυπνη Εξαγωγή Εξετάσεων (Robust Mode)")
-st.markdown("""
-Αυτή η έκδοση είναι σχεδιασμένη να διαβάζει δύσκολες μορφοποιήσεις (αστερίσκους, αλλαγές γραμμών, κόμματα).
-""")
+# --- ΡΥΘΜΙΣΕΙΣ ---
+st.set_page_config(page_title="Lab Results Scanner", layout="wide")
+st.title("🔬 Εξαγωγή Εξετάσεων (Έκδοση Σαρωτής)")
+st.markdown("Αυτή η έκδοση καθαρίζει 'κρυφούς' χαρακτήρες (όπως \", $, *) που εμποδίζουν την ανάγνωση.")
 
-# --- Η "ΕΞΥΠΝΗ" ΣΥΝΑΡΤΗΣΗ ΕΞΑΓΩΓΗΣ ---
-def smart_extract(text, patterns):
-    """
-    Ψάχνει στο κείμενο με βάση πολλαπλά κλειδιά.
-    Μόλις βρει το κλειδί, ψάχνει τον κοντινότερο αριθμό δεξιά του.
-    """
-    # Αντικαθιστούμε αλλαγές γραμμής με κενά για να γίνει το κείμενο μια ευθεία γραμμή
-    clean_text = text.replace('\n', ' ').replace('\r', ' ')
+# --- Η ΣΥΝΑΡΤΗΣΗ ΚΑΘΑΡΙΣΜΟΥ ΚΑΙ ΕΥΡΕΣΗΣ ---
+def aggressive_extract(text, keywords):
+    # 1. Καθαρισμός "θορύβου" από το PDF (με βάση τα δείγματα που είδαμε)
+    # Αντικαθιστούμε εισαγωγικά, δολάρια, αστερίσκους και κάθετες γραμμές με κενά
+    clean_text = text.replace('"', ' ').replace('$', ' ').replace('*', ' ').replace('|', ' ')
     
-    for pattern in patterns:
-        # Ψάχνουμε τη λέξη κλειδί (π.χ. "PLT") και παίρνουμε τα επόμενα 30 ψηφία
-        # (?i) = ignore case (δεν μας νοιάζουν κεφαλαία/μικρά)
-        match = re.search(f"(?i){pattern}.{{0,40}}", clean_text)
+    # 2. Αντικατάσταση πολλαπλών κενών με ένα
+    clean_text = re.sub(r'\s+', ' ', clean_text)
+
+    for key in keywords:
+        # Ψάχνουμε τη λέξη κλειδί (αδιαφορώντας για κεφαλαία/μικρά)
+        # και παίρνουμε τα επόμενα 50 ψηφία κειμένου
+        match = re.search(f"(?i){key}.{{0,50}}", clean_text)
         
         if match:
-            # Βρήκαμε την περιοχή γύρω από τη λέξη κλειδί. Τώρα ψάχνουμε τον αριθμό μέσα εκεί.
-            chunk = match.group(0)
+            found_chunk = match.group(0)
             
-            # Regex για αριθμό: Μπορεί να έχει κόμμα ή τελεία (π.χ. 12,5 ή 12.5 ή 140)
-            # Αγνοούμε τον αστερίσκο (*)
-            number_match = re.search(r"(\d+([.,]\d+)?)", chunk)
+            # 3. Ψάχνουμε για ΑΡΙΘΜΟ μέσα σε αυτό το κομμάτι
+            # Ο αριθμός μπορεί να είναι ακέραιος (150) ή δεκαδικός (12,5 ή 12.5)
+            # Αγνοούμε αριθμούς που μοιάζουν με ημερομηνίες ή κωδικούς (π.χ. μεγάλα νούμερα)
+            numbers = re.findall(r"(\d+[,.]?\d*)", found_chunk)
             
-            if number_match:
-                value_str = number_match.group(1)
-                # Διόρθωση: Αντικατάσταση κόμματος με τελεία για να το καταλάβει η Python
-                value_str = value_str.replace(',', '.')
+            for num_str in numbers:
+                # Μετατροπή σε float
+                val_clean = num_str.replace(',', '.')
                 try:
-                    return float(value_str)
+                    value = float(val_clean)
+                    
+                    # Φίλτρα Λογικής (για να μην πιάσει π.χ. το έτος 2024 αντί για τα αιμοπετάλια)
+                    # Αν ψάχνουμε αιμοπετάλια και βρούμε αριθμό < 10, μάλλον είναι λάθος, πάμε στον επόμενο
+                    if "PLT" in key and value < 10: 
+                        continue 
+                        
+                    return value
                 except ValueError:
                     continue
     return None
 
 def extract_date(text, filename):
-    # Ψάχνουμε ημερομηνία στο κείμενο (μορφής 15/01/24 ή 15/01/2024)
-    match = re.search(r'(\d{1,2}/\d{1,2}/\d{2,4})', text)
-    if match: return match.group(1)
+    # Καθαρισμός για να βρούμε την ημερομηνία πιο εύκολα
+    clean_text = text.replace('"', ' ').replace('Ημ/νία:', ' ').replace('Date:', ' ')
     
-    # Αν δεν βρεθεί, ψάχνουμε στο όνομα αρχείου (π.χ. NAME-240115.pdf)
+    match = re.search(r'(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})', clean_text)
+    if match:
+        day, month, year = match.groups()
+        if len(year) == 2: year = "20" + year
+        return f"{day}/{month}/{year}"
+    
+    # Αν δεν βρεθεί στο κείμενο, ψάχνουμε στο όνομα αρχείου
     match_file = re.search(r'[-_](\d{6})', filename)
     if match_file:
         d = match_file.group(1)
         return f"{d[4:6]}/{d[2:4]}/20{d[0:2]}"
     return "Άγνωστη"
 
-# --- UPLOAD ΑΡΧΕΙΩΝ ---
-uploaded_files = st.file_uploader("📂 Σύρετε τα αρχεία PDF εδώ (Απεριόριστα)", type="pdf", accept_multiple_files=True)
+# --- UPLOAD ---
+uploaded_files = st.file_uploader("📂 Ανεβάστε τα PDF αρχεία σας", type="pdf", accept_multiple_files=True)
 
-# --- ΛΙΣΤΑ ΕΞΕΤΑΣΕΩΝ (ΜΕ ΠΟΛΛΑΠΛΑ ΚΛΕΙΔΙΑ ΓΙΑ ΣΙΓΟΥΡΙΑ) ---
-# Εδώ ορίζουμε τι ψάχνουμε. Κάθε εξέταση έχει μια λίστα από πιθανά ονόματα (keywords).
+# --- ΕΠΙΛΟΓΕΣ ---
 metrics_config = {
     "Αιμοπετάλια (PLT)": ["PLT", "Αιμοπετάλια", "Platelets"],
     "Αιμοσφαιρίνη (HGB)": ["HGB", "Αιμοσφαιρίνη", "Hemoglobin"],
     "Λευκά Αιμοσφαίρια (WBC)": ["WBC", "Λευκά", "White Blood"],
-    "Αιματοκρίτης (HCT)": ["HCT", "Αιματοκρίτης"],
     "Σάκχαρο": ["Σάκχαρο", "Glucose", "GLU"],
-    "Χοληστερίνη": ["Χοληστερίνη", "Cholesterol", "CHOL"],
-    "Τριγλυκερίδια": ["Τριγλυκερίδια", "Triglycerides", "TRIG"],
-    "Σίδηρος (Fe)": ["Σίδηρος", "Iron", "Fe "], # Κενό μετά το Fe για να μην πιάσει το Ferritin
+    "Χοληστερίνη": ["Χοληστερίνη", "Cholesterol"],
+    "Τριγλυκερίδια": ["Τριγλυκερίδια", "Triglycerides"],
+    "Σίδηρος": ["Σίδηρος", "Fe "],
     "Φερριτίνη": ["Φερριτίνη", "Ferritin"],
     "B12": ["B12", "Vit B12"],
-    "TSH": ["TSH", "Θυρεοειδοτρόπος"],
-    "T3": ["T3", "Τριιωδοθυρονίνη"],
-    "T4": ["T4", "Θυροξίνη"],
-    "Κάλιο": ["Κάλιο", "Potassium", " K "],
-    "Νάτριο": ["Νάτριο", "Sodium", " Na "]
+    "TSH": ["TSH", "Θυρεοειδοτρόπος"]
 }
 
-selected_metrics = st.multiselect(
-    "Επιλέξτε Εξετάσεις:", 
-    list(metrics_config.keys()), 
-    default=["Αιμοπετάλια (PLT)", "Αιμοσφαιρίνη (HGB)", "Λευκά Αιμοσφαίρια (WBC)"]
-)
+selected_metrics = st.multiselect("Επιλέξτε Εξετάσεις:", list(metrics_config.keys()), default=["Αιμοπετάλια (PLT)"])
 
 # --- ΕΚΤΕΛΕΣΗ ---
-if st.button("🚀 ΕΞΑΓΩΓΗ ΤΙΜΩΝ") and uploaded_files:
+if st.button("🚀 ΕΞΑΓΩΓΗ") and uploaded_files:
     results = []
-    progress_bar = st.progress(0)
+    progress = st.progress(0)
     
-    st.info(f"Επεξεργασία {len(uploaded_files)} αρχείων...")
-
-    for i, uploaded_file in enumerate(uploaded_files):
+    for i, file in enumerate(uploaded_files):
         try:
-            # Διάβασμα PDF
-            with pdfplumber.open(uploaded_file) as pdf:
-                full_text = ""
+            with pdfplumber.open(file) as pdf:
+                text = ""
                 for page in pdf.pages:
-                    full_text += (page.extract_text() or "") + " "
+                    text += (page.extract_text() or "") + " "
             
-            # Δημιουργία γραμμής αποτελεσμάτων
-            row = {
-                'Όνομα Αρχείου': uploaded_file.name, 
-                'Ημερομηνία': extract_date(full_text, uploaded_file.name)
-            }
+            row = {'Αρχείο': file.name, 'Ημερομηνία': extract_date(text, file.name)}
             
-            # Εξαγωγή κάθε επιλεγμένης εξέτασης
             for metric in selected_metrics:
-                patterns = metrics_config[metric]
-                val = smart_extract(full_text, patterns)
+                val = aggressive_extract(text, metrics_config[metric])
                 row[metric] = val
             
             results.append(row)
-
+            
         except Exception as e:
-            st.error(f"Σφάλμα στο αρχείο {uploaded_file.name}: {e}")
+            st.error(f"Error in {file.name}: {e}")
         
-        # Ενημέρωση μπάρας
-        progress_bar.progress((i + 1) / len(uploaded_files))
+        progress.progress((i + 1) / len(uploaded_files))
 
-    # --- ΕΜΦΑΝΙΣΗ ΑΠΟΤΕΛΕΣΜΑΤΩΝ ---
     if results:
         df = pd.DataFrame(results)
+        # Ταξινόμηση
+        df['Date_Obj'] = pd.to_datetime(df['Ημερομηνία'], dayfirst=True, errors='coerce')
+        df = df.sort_values('Date_Obj').drop(columns=['Date_Obj'])
         
-        # Μορφοποίηση ημερομηνίας
-        df['Ημερομηνία'] = pd.to_datetime(df['Ημερομηνία'], dayfirst=True, errors='coerce')
-        df = df.sort_values('Ημερομηνία')
-        df['Ημερομηνία'] = df['Ημερομηνία'].dt.strftime('%d/%m/%Y')
-
-        st.success("✅ Ολοκληρώθηκε!")
+        st.write("### Αποτελέσματα:")
         st.dataframe(df)
-
-        # Download Excel
-        buffer = io.BytesIO()
-        with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+        
+        # Download
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df.to_excel(writer, index=False)
         
-        st.download_button(
-            label="📥 Κατεβάστε το Excel",
-            data=buffer.getvalue(),
-            file_name="lab_results.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
-    else:
-        st.warning("Δεν βρέθηκαν αποτελέσματα. Δοκιμάστε να ανοίξετε τα PDF και να δείτε αν το κείμενο επιλέγεται με το ποντίκι.")
-
-elif not uploaded_files:
-    st.write("👆 Ανεβάστε τα PDF σας για να ξεκινήσετε.")
+        st.download_button("📥 Κατέβασμα Excel", data=output.getvalue(), file_name="results.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
