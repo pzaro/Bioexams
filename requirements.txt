@@ -6,5 +6,6 @@ pandas
 scipy
 statsmodels
 fpdf
-matplotlib
+plotly
+kaleido
 Pillow
