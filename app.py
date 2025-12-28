@@ -422,7 +422,9 @@ def create_print_pdf(display_df: pd.DataFrame, chart_png_bytes: bytes | None):
             except:
                 pass
 
-    return pdf.output(dest="S").encode("latin-1")
+out = pdf.output(dest="S")
+return bytes(out) if isinstance(out, (bytes, bytearray)) else out.encode("latin-1")
+
 
 # -------------------------
 # 12) STATS (Pearson) + THEORY
@@ -670,3 +672,4 @@ if st.session_state.df_master is not None:
                     })
     else:
         st.info("Για συσχέτιση χρειάζονται τουλάχιστον 2 επιλεγμένες εξετάσεις.")
+
