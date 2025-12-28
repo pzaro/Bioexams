@@ -206,7 +206,7 @@ def run_statistics(df, col_x, col_y):
 
 # --- 7. DATABASE & APP ---
 
-# Η ΠΛΗΡΗΣ ΛΙΣΤΑ (ΣΩΣΤΑ ΟΝΟΜΑΤΑ ΓΙΑ ΝΑ ΜΗΝ ΣΚΑΕΙ)
+# Η ΠΛΗΡΗΣ ΛΙΣΤΑ (ΤΩΡΑ ΜΕ ΒΙΤΑΜΙΝΗ D)
 ALL_METRICS_DB = {
     # Γενική
     "Ερυθρά (RBC)": ["RBC", "Ερυθρά"],
@@ -243,6 +243,11 @@ ALL_METRICS_DB = {
     "Σίδηρος (Fe)": ["Fe ", "Σίδηρος"],
     "Φερριτίνη": ["Ferritin", "Φερριτίνη"],
     "B12": ["B12"],
+    
+    # --- ΕΔΩ ΕΙΝΑΙ Η D ---
+    "Βιταμίνη D3": ["Vit D", "D3", "25-OH"],
+    "Φυλλικό Οξύ": ["Folic", "Φυλλικό"],
+    
     "TSH": ["TSH"],
     "T3": ["T3 "],
     "T4": ["T4 "],
@@ -259,18 +264,14 @@ uploaded_files = st.sidebar.file_uploader("Upload PDF", type="pdf", accept_multi
 
 all_keys = list(ALL_METRICS_DB.keys())
 
-# --- Η ΔΙΟΡΘΩΣΗ ΤΟΥ ΣΦΑΛΜΑΤΟΣ ΕΙΝΑΙ ΕΔΩ ---
-# Οι default τιμές πρέπει να υπάρχουν ΑΚΡΙΒΩΣ στη λίστα all_keys
+# Default values που ταιριάζουν ΑΚΡΙΒΩΣ στη λίστα
 default_choices = [
     "Αιμοπετάλια (PLT)", 
-    "Σάκχαρο (GLU)",  # Διορθώθηκε από "Σάκχαρο"
-    "Χοληστερίνη Ολική", # Διορθώθηκε από "Χοληστερίνη"
+    "Σάκχαρο (GLU)", 
+    "Χοληστερίνη Ολική",
     "Ερυθρά (RBC)", 
     "Λευκά (WBC)"
 ]
-
-# Έλεγχος αν οι default υπάρχουν όντως (για ασφάλεια)
-safe_defaults = [x for x in default_choices if x in all_keys]
 
 container = st.sidebar.container()
 select_all = st.sidebar.checkbox("Επιλογή ΟΛΩΝ")
@@ -278,7 +279,7 @@ select_all = st.sidebar.checkbox("Επιλογή ΟΛΩΝ")
 if select_all:
     selected_metric_keys = container.multiselect("Εξετάσεις:", all_keys, default=all_keys)
 else:
-    selected_metric_keys = container.multiselect("Εξετάσεις:", all_keys, default=safe_defaults)
+    selected_metric_keys = container.multiselect("Εξετάσεις:", all_keys, default=default_choices)
 
 active_metrics_map = {k: ALL_METRICS_DB[k] for k in selected_metric_keys}
 
