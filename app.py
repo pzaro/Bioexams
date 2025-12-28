@@ -1,95 +1,21 @@
-# app.py
-# Streamlit app: Extract lab values from PDF by locating keywords and nearest value tokens
-# Uses pdfplumber.extract_words() (positions) WITHOUT requiring table headers/anchors.
-# Keeps values as written in PDF (commas, *, ++++, <, >, etc.)
-
+import json
 import re
 from io import BytesIO
 from datetime import datetime
 
-import pdfplumber
+import fitz  # PyMuPDF
 import pandas as pd
 import streamlit as st
+from google.cloud import vision
+from google.oauth2 import service_account
 
 
-# ----------------------------
-# Defaults / Aliases
-# ----------------------------
-DEFAULT_TESTS = [
-    "Αιμοπετάλια",
-    "Αιμοσφαιρίνη",
-    "Λευκά",
-    "Αιματοκρίτης",
-    "MCV",
-    "MCH",
-    "MCHC",
-    "RDW",
-    "Σάκχαρο",
-    "Ουρία",
-    "Κρεατινίνη",
-    "Ουρικό Οξύ",
-    "AST",
-    "ALT",
-    "ALP",
-    "γ-GT",
-    "CPK",
-    "LDH",
-    "Σίδηρος",
-    "Φερριτίνη",
-    "B12",
-    "Φυλλικό Οξύ",
-    "TSH",
-    "Βιταμίνη D",
-]
-
-TEST_ALIASES = {
-    "Αιμοπετάλια": ["PLT", "Αιμοπετάλια"],
-    "Αιμοσφαιρίνη": ["HGB", "Αιμοσφαιρίνη"],
-    "Λευκά": ["WBC", "Λευκά"],
-    "Αιματοκρίτης": ["HCT", "Αιματοκρίτης"],
-    "MCV": ["MCV"],
-    "MCH": ["MCH"],
-    "MCHC": ["MCHC"],
-    "RDW": ["RDW"],
-    "Σάκχαρο": ["Σάκχαρο", "Glucose"],
-    "Ουρία": ["Ουρία"],
-    "Κρεατινίνη": ["Κρεατινίνη"],
-    "Ουρικό Οξύ": ["Ουρικό", "Ουρικό Οξύ"],
-    "AST": ["SGOT", "AST"],
-    "ALT": ["SGPT", "ALT"],
-    "ALP": ["Αλκαλική", "ALP", "Φωσφατάση"],
-    "γ-GT": ["γ-GT", "g-GT", "GGT"],
-    "CPK": ["CPK", "Κρεατινοφωσφοκινάση"],
-    "LDH": ["LDH"],
-    "Σίδηρος": ["Σίδηρος"],
-    "Φερριτίνη": ["Φερριτίνη"],
-    "B12": ["B12", "Β12", "Βιταμίνη"],
-    "Φυλλικό Οξύ": ["Φυλλικό", "Φυλλικό Οξύ"],
-    "TSH": ["TSH"],
-    "Βιταμίνη D": ["Βιταμίνη", "25-OHD", "25-OH"],
-}
-
+# -----------------------------
+# Date helpers
+# -----------------------------
 DATE_PATTERN = re.compile(r"\b(\d{2})/(\d{2})/(\d{2}|\d{4})\b")
 
-# Value token as it appears in lab reports:
-# - numeric with optional decimal comma/dot and optional trailing *
-# - < 0,01 style
-# - plus signs + / ++ / +++ / ++++
-# - common qualitative outputs
-VALUE_TOKEN_RE = re.compile(
-    r"""^(
-        <\s*\d+(?:[.,]\d+)?\*? |
-        \d+(?:[.,]\d+)?\*? |
-        \+{1,4} |
-        Ιχνη|Ίχνη|Trace|Σπάνια|ΟΧΙ|ΝΑΙ|Όχι|Ναι|Αρνητικό|Θετικό|αρνητικό|θετικό
-    )$""",
-    re.IGNORECASE | re.VERBOSE,
-)
 
-
-# ----------------------------
-# Date helpers
-# ----------------------------
 def find_date_in_text(text: str):
     m = DATE_PATTERN.search(text or "")
     if not m:
@@ -108,6 +34,7 @@ def find_date_in_text(text: str):
 
 
 def find_date_in_filename(filename: str):
+    # 8 digits YYYYMMDD
     m8 = re.search(r"(\d{8})", filename or "")
     if m8:
         s = m8.group(1)
@@ -117,6 +44,7 @@ def find_date_in_filename(filename: str):
         except ValueError:
             pass
 
+    # 6 digits YYMMDD (e.g. 240115 -> 15/01/2024)
     m6 = re.search(r"(\d{6})", filename or "")
     if m6:
         s = m6.group(1)
@@ -133,205 +61,288 @@ def find_date_in_filename(filename: str):
     return None, None
 
 
-# ----------------------------
-# PDF extraction helpers
-# ----------------------------
-def safe_open_pdf(file_obj):
-    # Ensure pointer at start before pdfplumber reads
+# -----------------------------
+# Google Vision client
+# -----------------------------
+def get_vision_client():
+    """
+    Expects Streamlit secret:
+      GCP_SERVICE_ACCOUNT_JSON = """{...}"""
+    """
+    if "GCP_SERVICE_ACCOUNT_JSON" not in st.secrets:
+        return None, (
+            "Λείπει το Secret `GCP_SERVICE_ACCOUNT_JSON`.\n"
+            "Βάλε στο Streamlit Cloud → Settings → Secrets το JSON του Service Account."
+        )
+
+    raw = st.secrets["GCP_SERVICE_ACCOUNT_JSON"]
     try:
-        file_obj.seek(0)
+        info = json.loads(raw)
     except Exception:
-        pass
-    return pdfplumber.open(file_obj)
+        # sometimes user may paste as dict-like; try to be helpful
+        return None, "Το `GCP_SERVICE_ACCOUNT_JSON` δεν είναι έγκυρο JSON."
+
+    creds = service_account.Credentials.from_service_account_info(info)
+    client = vision.ImageAnnotatorClient(credentials=creds)
+    return client, None
 
 
-def extract_full_text(pdf_file) -> str:
-    try:
-        with safe_open_pdf(pdf_file) as pdf:
-            parts = [(p.extract_text() or "") for p in pdf.pages]
-        return "\n".join(parts)
-    except Exception:
+# -----------------------------
+# PDF -> Images (PyMuPDF)
+# -----------------------------
+def pdf_to_png_bytes_list(pdf_bytes: bytes, dpi: int = 220):
+    """
+    Render each page to PNG bytes using PyMuPDF.
+    Works on Streamlit Cloud (no poppler needed).
+    """
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    images = []
+    zoom = dpi / 72.0  # 72 is default
+    mat = fitz.Matrix(zoom, zoom)
+
+    for i in range(doc.page_count):
+        page = doc.load_page(i)
+        pix = page.get_pixmap(matrix=mat, alpha=False)
+        images.append((i + 1, pix.tobytes("png")))
+    doc.close()
+    return images
+
+
+# -----------------------------
+# OCR + parsing
+# -----------------------------
+def ocr_image_bytes(client: vision.ImageAnnotatorClient, png_bytes: bytes) -> str:
+    image = vision.Image(content=png_bytes)
+    response = client.text_detection(image=image)
+    if response.error and response.error.message:
+        raise RuntimeError(response.error.message)
+    if not response.text_annotations:
         return ""
+    return response.text_annotations[0].description or ""
 
 
-def is_value_token(s: str) -> bool:
-    t = (s or "").strip()
-    # Normalize weird spaces
-    t = t.replace("\u00A0", " ")
-    t = re.sub(r"\s+", " ", t).strip()
-    return bool(VALUE_TOKEN_RE.match(t))
+VALUE_TOKEN = r"(<\s*\d+(?:[.,]\d+)?\*?|\d+(?:[.,]\d+)?\*?|\+{1,4}|Ιχνη|Ίχνη|Trace|Σπάνια|ΟΧΙ|ΝΑΙ|Όχι|Ναι|Αρνητικό|Θετικό|αρνητικό|θετικό)"
+ROW_RE = re.compile(
+    rf"""
+    ^\s*
+    (?P<exam>.+?)                 # everything up to the value
+    \s+
+    (?P<result>{VALUE_TOKEN})     # the value token (raw)
+    (?:\s+(?P<ref>.+))?           # rest of line as reference (raw)
+    \s*$
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
 
 
-def normalize_word(s: str) -> str:
-    return re.sub(r"\s+", " ", (s or "").replace("\u00A0", " ")).strip()
+def normalize_ocr_text(text: str) -> str:
+    t = (text or "").replace("\u00A0", " ")
+    # keep line breaks; just normalize spaces
+    t = re.sub(r"[ \t]+", " ", t)
+    return t
 
 
-def keyword_match(word_text: str, alias: str) -> bool:
-    return alias.lower() in (word_text or "").lower()
-
-
-def distance(a, b):
-    # Euclidean-ish distance on (x0, top)
-    return ((a["x0"] - b["x0"]) ** 2 + (a["top"] - b["top"]) ** 2) ** 0.5
-
-
-def extract_value_by_proximity(pdf_file, aliases: list[str], y_band=4.0, x_min_gap=8.0):
+def extract_rows_from_ocr_text(text: str):
     """
-    For each page:
-      - extract words with positions
-      - find keyword word(s) that match aliases
-      - collect candidate value tokens (raw) near keyword:
-          a) same line band: abs(top - kw_top) <= y_band and x0 > kw_x1 + gap
-          b) fallback: slightly below: 0 < (top - kw_top) <= 18 and x0 > kw_x1 + gap
-      - pick nearest reasonable candidate (prefer same-line, then below)
-    Returns raw value token string or None.
+    Convert OCR full text into table-like rows.
+    Heuristics:
+      - parse by lines
+      - keep lines that contain a value token
+      - return exam/result/ref exactly as OCR produced
     """
-    try:
-        with safe_open_pdf(pdf_file) as pdf:
-            for page in pdf.pages:
-                words = page.extract_words(keep_blank_chars=False, use_text_flow=True) or []
-                # Normalize text field
-                for w in words:
-                    w["text"] = normalize_word(w.get("text", ""))
+    rows = []
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        m = ROW_RE.match(line)
+        if not m:
+            continue
 
-                # Identify keyword occurrences
-                kw_words = []
-                for w in words:
-                    for a in aliases:
-                        if keyword_match(w["text"], a):
-                            kw_words.append(w)
-                            break
-                if not kw_words:
-                    continue
+        exam = (m.group("exam") or "").strip()
+        result = (m.group("result") or "").strip()
+        ref = (m.group("ref") or "").strip()
 
-                # Candidate value words
-                value_words = [w for w in words if is_value_token(w["text"])]
+        # filter obvious non-test lines
+        low = exam.lower()
+        if low.startswith("σχό") or low.startswith("ερμηνε") or low.startswith("παρατη"):
+            continue
 
-                if not value_words:
-                    continue
+        # exam should not be just a unit or a range
+        if len(exam) < 2:
+            continue
 
-                # Evaluate candidates
-                best = None  # (priority, dist, value_text)
-                for kw in kw_words:
-                    kw_top = kw["top"]
-                    kw_x1 = kw["x1"]
-
-                    for vw in value_words:
-                        # Must be to the right (typically result column)
-                        if vw["x0"] <= kw_x1 + x_min_gap:
-                            continue
-
-                        dy = vw["top"] - kw_top
-                        # priority 0: same-line band
-                        if abs(dy) <= y_band:
-                            pr = 0
-                        # priority 1: slightly below (broken line)
-                        elif 0 < dy <= 18:
-                            pr = 1
-                        else:
-                            continue
-
-                        d = distance(kw, vw)
-                        cand = (pr, d, vw["text"])
-                        if best is None or cand < best:
-                            best = cand
-
-                if best:
-                    return best[2]
-    except Exception:
-        return None
-
-    return None
+        rows.append(
+            {
+                "Εξέταση": exam,
+                "Αποτέλεσμα": result,
+                "Τ. Αναφοράς": ref,
+                "Raw line": line,
+            }
+        )
+    return rows
 
 
-def to_excel_bytes(df: pd.DataFrame) -> bytes:
+def make_wide(df_long: pd.DataFrame) -> pd.DataFrame:
+    """
+    Pivot to wide: 1 column per exam, raw result values.
+    Deduplicate by keeping first occurrence per (file,date,exam).
+    """
+    base = df_long.copy()
+    base = base[base["Εξέταση"].notna() & (base["Εξέταση"].str.strip() != "")]
+    base = base.sort_values(["Αρχείο", "Ημερομηνία (ISO)", "Σελίδα"]).drop_duplicates(
+        subset=["Αρχείο", "Ημερομηνία (ISO)", "Εξέταση"], keep="first"
+    )
+
+    wide = base.pivot_table(
+        index=["Αρχείο", "Ημερομηνία (ISO)", "Ημερομηνία"],
+        columns="Εξέταση",
+        values="Αποτέλεσμα",
+        aggfunc="first",
+    ).reset_index()
+
+    wide.columns = [str(c) for c in wide.columns]
+    return wide
+
+
+def to_excel_bytes(df_long: pd.DataFrame, df_wide: pd.DataFrame) -> bytes:
     bio = BytesIO()
     with pd.ExcelWriter(bio, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="Results")
+        df_long.to_excel(writer, index=False, sheet_name="Long_All_Rows")
+        df_wide.to_excel(writer, index=False, sheet_name="Wide_Results")
     return bio.getvalue()
 
 
-# ----------------------------
+# -----------------------------
 # Streamlit UI
-# ----------------------------
-st.set_page_config(page_title="Εξαγωγή εξετάσεων από PDF (Proximity)", layout="wide")
-st.title("Εξαγωγή εξετάσεων από PDF σε Excel (Proximity)")
+# -----------------------------
+st.set_page_config(page_title="OCR PDF Εξετάσεων (Google Vision)", layout="wide")
+st.title("OCR PDF Εξετάσεων → Excel (Google Vision)")
 st.caption(
-    "Εξάγει τιμές εντοπίζοντας τις λέξεις-κλειδιά και την πλησιέστερη τιμή δεξιά/λίγο κάτω. "
-    "Δεν απαιτεί headers/anchors και κρατά τις τιμές όπως στο PDF."
+    "Για PDF που είναι εικόνες (χωρίς selectable text). Κρατά τις τιμές όπως αναγράφονται στο PDF."
 )
+
+client, err = get_vision_client()
+if err:
+    st.error(err)
+    st.stop()
 
 with st.sidebar:
     st.header("Ρυθμίσεις")
-    debug_mode = st.toggle("Debug Mode", value=False, help="Δείχνει στατιστικά/δείγμα κειμένου του 1ου PDF.")
-    y_band = st.slider("y_band (ίδια γραμμή)", 2.0, 8.0, 4.0, 0.5)
-    x_gap = st.slider("x_min_gap (δεξιά από keyword)", 0.0, 30.0, 8.0, 1.0)
-
-    selected_tests = st.multiselect(
-        "Επιλογή εξετάσεων",
-        options=list(TEST_ALIASES.keys()),
-        default=DEFAULT_TESTS,
-    )
+    dpi = st.slider("Ποιότητα render (DPI)", 150, 320, 220, 10)
+    make_wide_view = st.toggle("Δημιουργία Wide πίνακα", value=True)
+    debug_mode = st.toggle("Debug Mode", value=False)
 
 files = st.file_uploader("Ανέβασε PDF αρχεία", type=["pdf"], accept_multiple_files=True)
-run = st.button("Έναρξη Εξαγωγής", type="primary", disabled=not files or not selected_tests)
+run = st.button("Έναρξη OCR & Εξαγωγής", type="primary", disabled=not files)
 
 if run:
-    rows = []
-    debug_info = None
+    all_rows = []
+    debug_payload = {}
 
-    with st.spinner("Εξάγω δεδομένα..."):
-        for i, f in enumerate(files):
-            filename = getattr(f, "name", "uploaded.pdf")
+    progress = st.progress(0)
+    total_pages = 0
 
-            # Date: prefer text, fallback filename
-            full_text = extract_full_text(f)
-            iso, disp = find_date_in_text(full_text)
+    # First pass: count pages
+    file_pages = []
+    for f in files:
+        pdf_bytes = f.read()
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        pc = doc.page_count
+        doc.close()
+        file_pages.append((f.name, pdf_bytes, pc))
+        total_pages += pc
+
+    done = 0
+
+    with st.spinner("Τρέχει OCR..."):
+        for (fname, pdf_bytes, pc) in file_pages:
+            # Render pages to images
+            images = pdf_to_png_bytes_list(pdf_bytes, dpi=dpi)
+
+            # OCR all pages and merge text (for date detection)
+            ocr_text_pages = []
+            for (pageno, png_bytes) in images:
+                text = ocr_image_bytes(client, png_bytes)
+                text = normalize_ocr_text(text)
+                ocr_text_pages.append((pageno, text))
+
+                done += 1
+                progress.progress(min(1.0, done / max(1, total_pages)))
+
+            full_ocr_text = "\n".join([t for _, t in ocr_text_pages])
+
+            # Date: prefer OCR text; fallback filename
+            iso, disp = find_date_in_text(full_ocr_text)
             if not iso:
-                iso, disp = find_date_in_filename(filename)
+                iso, disp = find_date_in_filename(fname)
 
-            # Debug: for first file show if we actually get words/tokens
-            if debug_mode and i == 0:
-                try:
-                    with safe_open_pdf(f) as pdf:
-                        page0 = pdf.pages[0]
-                        w = page0.extract_words(keep_blank_chars=False, use_text_flow=True) or []
-                        sample_words = [normalize_word(x.get("text", "")) for x in w[:40]]
-                        debug_info = {
-                            "extract_text_first_600": (page0.extract_text() or "")[:600],
-                            "words_count_page1": len(w),
-                            "first_words_sample": sample_words,
+            # Parse rows per page
+            for pageno, page_text in ocr_text_pages:
+                rows = extract_rows_from_ocr_text(page_text)
+                for r in rows:
+                    r.update(
+                        {
+                            "Αρχείο": fname,
+                            "Ημερομηνία (ISO)": iso,
+                            "Ημερομηνία": disp,
+                            "Σελίδα": pageno,
                         }
-                except Exception as e:
-                    debug_info = {"error": str(e)}
+                    )
+                all_rows.extend(rows)
 
-            row = {"Αρχείο": filename, "Ημερομηνία (ISO)": iso, "Ημερομηνία": disp}
+            if debug_mode and fname not in debug_payload:
+                debug_payload[fname] = {
+                    "ocr_text_first_1200": full_ocr_text[:1200],
+                    "pages": pc,
+                    "rows_extracted": len(all_rows),
+                }
 
-            for test in selected_tests:
-                aliases = TEST_ALIASES.get(test, [test])
-                val = extract_value_by_proximity(f, aliases, y_band=y_band, x_min_gap=x_gap)
-                row[test] = val  # raw, as-is
-            rows.append(row)
-
-            try:
-                f.seek(0)
-            except Exception:
-                pass
+    progress.empty()
 
     if debug_mode:
-        st.subheader("Debug (1ο PDF)")
-        st.json(debug_info or {})
+        st.subheader("Debug")
+        st.json(debug_payload)
 
-    df = pd.DataFrame(rows)
-    df["_sort_date"] = pd.to_datetime(df["Ημερομηνία (ISO)"], errors="coerce")
-    df = df.sort_values(["_sort_date", "Αρχείο"], na_position="last").drop(columns=["_sort_date"])
+    if not all_rows:
+        st.error(
+            "Δεν εντοπίστηκαν γραμμές εξετάσεων από το OCR κείμενο. "
+            "Αυτό σημαίνει ότι χρειάζεται μικρή προσαρμογή του parser στο format του συγκεκριμένου εργαστηρίου."
+        )
+        st.stop()
 
-    st.subheader("Αποτελέσματα")
-    st.dataframe(df, use_container_width=True)
+    df_long = pd.DataFrame(all_rows)
 
+    # Order columns
+    cols = [
+        "Αρχείο",
+        "Ημερομηνία (ISO)",
+        "Ημερομηνία",
+        "Σελίδα",
+        "Εξέταση",
+        "Αποτέλεσμα",
+        "Τ. Αναφοράς",
+        "Raw line",
+    ]
+    df_long = df_long[[c for c in cols if c in df_long.columns]]
+
+    # Sort
+    df_long["_sort_date"] = pd.to_datetime(df_long["Ημερομηνία (ISO)"], errors="coerce")
+    df_long = df_long.sort_values(["_sort_date", "Αρχείο", "Σελίδα"], na_position="last").drop(columns=["_sort_date"])
+
+    st.subheader("Αποτελέσματα (Long: όλες οι γραμμές)")
+    st.dataframe(df_long, use_container_width=True)
+
+    df_wide = pd.DataFrame()
+    if make_wide_view:
+        df_wide = make_wide(df_long)
+        st.subheader("Αποτελέσματα (Wide: μία στήλη ανά εξέταση)")
+        st.dataframe(df_wide, use_container_width=True)
+
+    xlsx = to_excel_bytes(df_long, df_wide if make_wide_view else pd.DataFrame())
     st.download_button(
         "Κατέβασμα Excel (.xlsx)",
-        data=to_excel_bytes(df),
-        file_name="exams_extracted_proximity.xlsx",
+        data=xlsx,
+        file_name="lab_ocr_results.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
