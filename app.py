@@ -6,19 +6,15 @@ import pandas as pd
 import io
 import re
 
-# --- ΡΥΘΜΙΣΕΙΣ ΣΕΛΙΔΑΣ ---
-st.set_page_config(page_title="Google Vision Extractor", layout="wide")
-st.title("🦅 Google Vision OCR Extractor")
-st.info("Χρήση της Τεχνητής Νοημοσύνης της Google για ανάγνωση των PDF.")
+# --- ΡΥΘΜΙΣΕΙΣ ---
+st.set_page_config(page_title="Medical Lab Extractor Pro", layout="wide")
+st.title("🩸 Εξαγωγή Εξετάσεων (Πλήρης Έλεγχος)")
+st.info("Επίλεξε από τη λίστα ποιούς δείκτες θέλεις να ψάξει η Google στα PDF σου.")
 
-# --- 1. ΑΥΘΕΝΤΙΚΟΠΟΙΗΣΗ ΜΕ GOOGLE ---
+# --- 1. ΑΥΘΕΝΤΙΚΟΠΟΙΗΣΗ (GOOGLE VISION) ---
 def get_vision_client():
     try:
-        # ΔΙΟΡΘΩΣΗ: Διαβάζουμε τα secrets απευθείας ως dictionary (TOML format)
-        # Δεν χρειάζεται json.loads πλέον, γιατί το Streamlit το έχει ήδη μετατρέψει.
         key_dict = st.secrets["gcp_service_account"]
-        
-        # Δημιουργία των credentials από το λεξικό
         creds = service_account.Credentials.from_service_account_info(key_dict)
         client = vision.ImageAnnotatorClient(credentials=creds)
         return client
@@ -26,86 +22,123 @@ def get_vision_client():
         st.error(f"Πρόβλημα με το κλειδί Google Cloud: {e}")
         return None
 
-# --- 2. ΣΥΝΑΡΤΗΣΕΙΣ ΚΑΘΑΡΙΣΜΟΥ & ΕΥΡΕΣΗΣ ---
-
+# --- 2. ΚΑΘΑΡΙΣΜΟΣ ΤΙΜΩΝ ---
 def clean_number(val_str):
-    """Μετατρέπει κείμενο σε αριθμό, διορθώνοντας λάθη του OCR."""
     if not val_str: return None
+    # Διορθώσεις OCR λαθών
+    val_str = val_str.replace('O', '0').replace('o', '0').replace('l', '1').replace('I', '1')
+    val_str = val_str.replace('S', '5').replace('B', '8') # Συχνά λάθη
     
-    # Αντικατάσταση κοινών λαθών OCR (π.χ. το γράμμα O αντί για 0, το l αντί για 1)
-    val_str = val_str.replace('O', '0').replace('o', '0')
-    val_str = val_str.replace('l', '1').replace('I', '1')
-    
-    # Κρατάμε μόνο ψηφία και κόμμα/τελεία
     clean = re.sub(r"[^0-9,.]", "", val_str)
-    # Αλλαγή κόμματος σε τελεία
     clean = clean.replace(',', '.')
-    
     try:
         return float(clean)
     except:
         return None
 
-def parse_google_text(full_text, metrics_map):
+# --- 3. LOGIC ΕΥΡΕΣΗΣ ---
+def parse_google_text(full_text, selected_metrics_map):
     results = {}
     lines = full_text.split('\n')
     
     for line in lines:
-        # Καθαρίζουμε τη γραμμή από περιττά κενά
-        clean_line = " ".join(line.split())
+        clean_line = " ".join(line.split()) # Καθαρισμός κενών
         
-        for metric, keywords in metrics_map.items():
-            # Έλεγχος αν υπάρχει η λέξη κλειδί στη γραμμή
+        # Ψάχνουμε ΜΟΝΟ για τους δείκτες που επέλεξε ο χρήστης
+        for metric_name, keywords in selected_metrics_map.items():
+            
+            # Αν βρούμε έστω μία λέξη-κλειδί στη γραμμή (π.χ. "RBC" ή "Ερυθρά")
             if any(key.upper() in clean_line.upper() for key in keywords):
                 
-                # Ψάχνουμε όλους τους αριθμούς στη γραμμή
+                # Ψάχνουμε αριθμούς
                 numbers = re.findall(r"(\d+[,.]\d+|\d+)", clean_line)
                 
-                # Προσπαθούμε να βρούμε τον σωστό αριθμό
                 for num in numbers:
                     val = clean_number(num)
-                    
                     if val is not None:
-                        # --- ΦΙΛΤΡΑ ΛΟΓΙΚΗΣ (Για να μην πάρουμε σκουπίδια) ---
+                        # --- Φίλτρα Ασφαλείας ---
+                        # Έτη
+                        if val > 1900 and val < 2100 and "B12" not in metric_name: continue
+                        # Κωδικοί εξετάσεων (συχνά 6-8 ψηφία)
+                        if val > 10000: continue
                         
-                        # 1. Αγνοούμε έτη (π.χ. 2024, 2023) εκτός αν είναι B12
-                        if val > 1900 and val < 2100 and "B12" not in metric: 
-                            continue
+                        # Ειδικά φίλτρα για να μην μπερδεύει τα νούμερα
+                        if "Αιματοκρίτης" in metric_name and val < 10: continue # Ο HCT είναι συνήθως > 20
+                        if "Αιμοπετάλια" in metric_name and val < 10: continue # Τα PLT είναι συνήθως > 100
                         
-                        # 2. Για Αιμοπετάλια (PLT), τιμές κάτω από 10 είναι συνήθως λάθος
-                        if "PLT" in metric and val < 10: 
-                            continue
-                        
-                        # 3. Για Αιμοσφαιρίνη (HGB), τιμές πάνω από 20 είναι συνήθως λάθος
-                        if "HGB" in metric and val > 20:
-                            continue
-
-                        results[metric] = val
-                        break # Βρήκαμε τιμή, πάμε στην επόμενη εξέταση
+                        results[metric_name] = val
+                        break
     return results
 
-# --- 3. UI ΕΦΑΡΜΟΓΗΣ ---
-
-uploaded_files = st.file_uploader("📂 Ανεβάστε PDF", type="pdf", accept_multiple_files=True)
-
-# Λεξικό με τις εξετάσεις που ψάχνουμε και τα "κλειδιά" τους
-metrics_config = {
+# --- 4. Η ΜΕΓΑΛΗ ΛΙΣΤΑ ΔΕΙΚΤΩΝ ---
+# Εδώ ορίζουμε ΤΑ ΠΑΝΤΑ. Μπορείς να προσθέσεις κι άλλα αν λείπουν.
+ALL_METRICS = {
+    # --- Γενική Αίματος ---
+    "Ερυθρά (RBC)": ["RBC", "Ερυθρά", "Red Blood"],
+    "Αιμοσφαιρίνη (HGB)": ["HGB", "Αιμοσφαιρίνη", "Hemoglobin"],
+    "Αιματοκρίτης (HCT)": ["HCT", "Αιματοκρίτης", "Hematocrit"],
+    "Μέσος Όγκος Ερ. (MCV)": ["MCV", "Μέσος Όγκος"],
+    "Μέση Περιεκτ. Αιμ. (MCH)": ["MCH", "Μέση Περιεκτ"],
+    "Μέση Πυκν. Αιμ. (MCHC)": ["MCHC", "Μέση Πυκν"],
     "Αιμοπετάλια (PLT)": ["PLT", "Αιμοπετάλια", "Platelets"],
-    "Αιμοσφαιρίνη (HGB)": ["HGB", "Αιμοσφαιρίνη"],
-    "Λευκά (WBC)": ["WBC", "Λευκά"],
-    "Σάκχαρο": ["Σάκχαρο", "Glucose"],
-    "Χοληστερίνη": ["Χοληστερίνη", "Cholesterol"],
-    "Τριγλυκερίδια": ["Τριγλυκερίδια"],
-    "Σίδηρος": ["Σίδηρος", "Fe "], # Το κενό στο "Fe " βοηθά να μην μπερδευτεί με Ferritin
-    "B12": ["B12"],
-    "TSH": ["TSH"]
+    "Λευκά (WBC)": ["WBC", "Λευκά", "White Blood"],
+    "Ουδετερόφιλα (NEUT)": ["NEUT", "Ουδετερόφιλα", "Polymorph"],
+    "Λεμφοκύτταρα (LYMPH)": ["LYMPH", "Λεμφοκύτταρα"],
+    "Μονοπύρηνα (MONO)": ["MONO", "Μονοπύρηνα"],
+    "Ηωσινόφιλα (EOS)": ["EOS", "Ηωσινόφιλα"],
+    "Βασέοφιλα (BASO)": ["BASO", "Βασέοφιλα"],
+    
+    # --- Βιοχημικές ---
+    "Σάκχαρο (GLU)": ["GLU", "Σάκχαρο", "Glucose"],
+    "Ουρία": ["Urea", "Ουρία"],
+    "Κρεατινίνη": ["Creatinine", "Κρεατινίνη"],
+    "Ουρικό Οξύ": ["Uric Acid", "Ουρικό Οξύ"],
+    "Χοληστερίνη Ολική": ["Cholesterol", "Χοληστερίνη"],
+    "HDL (Καλή)": ["HDL"],
+    "LDL (Κακή)": ["LDL"],
+    "Τριγλυκερίδια": ["Triglycerides", "Τριγλυκερίδια"],
+    "SGOT (AST)": ["SGOT", "AST", "ΑΣΤ"],
+    "SGPT (ALT)": ["SGPT", "ALT", "ΑΛΤ"],
+    "γ-GT": ["GGT", "γ-GT", "γGT"],
+    "Αλκαλική Φωσφατάση (ALP)": ["ALP", "Αλκαλική"],
+    "Σίδηρος (Fe)": ["Iron", "Σίδηρος", "Fe "],
+    "Φερριτίνη": ["Ferritin", "Φερριτίνη"],
+    "Ασβέστιο (Ca)": ["Calcium", "Ασβέστιο"],
+    "Μαγνήσιο (Mg)": ["Magnesium", "Μαγνήσιο"],
+    "Κάλιο (K)": ["Potassium", "Κάλιο"],
+    "Νάτριο (Na)": ["Sodium", "Νάτριο"],
+    
+    # --- Ορμόνες & Βιταμίνες ---
+    "TSH (Θυρεοειδής)": ["TSH", "Θυρεοειδοτρόπος"],
+    "FT4": ["FT4", "Ελεύθερη Θυροξίνη"],
+    "FT3": ["FT3", "Τριιωδοθυρονίνη"],
+    "T3": ["T3 "],
+    "T4": ["T4 "],
+    "Βιταμίνη B12": ["B12", "Cobalamin"],
+    "Φυλλικό Οξύ": ["Folic", "Φυλλικό"],
+    "Βιταμίνη D": ["Vit D", "D3", "25-OH"]
 }
 
-if st.button("🚀 ΑΠΟΣΤΟΛΗ ΣΤΗ GOOGLE") and uploaded_files:
-    # 1. Παίρνουμε τον "πελάτη" της Google
+# --- 5. UI ΕΦΑΡΜΟΓΗΣ ---
+uploaded_files = st.file_uploader("📂 Ανεβάστε PDF", type="pdf", accept_multiple_files=True)
+
+# MULTISELECT: Εδώ επιλέγεις τι θες!
+st.write("### ⚙️ Επιλογή Δεικτών")
+selected_keys = st.multiselect(
+    "Ποιές εξετάσεις θέλεις να εξάγεις;", 
+    list(ALL_METRICS.keys()), 
+    default=["Ερυθρά (RBC)", "Αιμοσφαιρίνη (HGB)", "Αιμοπετάλια (PLT)", "Λευκά (WBC)", "Σάκχαρο (GLU)", "Χοληστερίνη Ολική"] # Προεπιλογές
+)
+
+# Δημιουργία υπο-λίστας μόνο με τα επιλεγμένα
+active_metrics = {k: ALL_METRICS[k] for k in selected_keys}
+
+if st.button("🚀 ΕΝΑΡΞΗ EXCEL") and uploaded_files:
     client = get_vision_client()
     
-    if client:
+    if not active_metrics:
+        st.warning("⚠️ Δεν επέλεξες καμία εξέταση! Διάλεξε κάτι από τη λίστα.")
+    elif client:
         all_data = []
         bar = st.progress(0)
         
@@ -114,38 +147,33 @@ if st.button("🚀 ΑΠΟΣΤΟΛΗ ΣΤΗ GOOGLE") and uploaded_files:
             full_text_scan = ""
             
             try:
-                # 2. Μετατροπή PDF σε Εικόνες (μια εικόνα ανά σελίδα)
-                # Το poppler πρέπει να είναι εγκατεστημένο (packages.txt)
+                # PDF -> Images
                 images = convert_from_bytes(file.read())
                 
                 for img in images:
-                    # Μετατροπή εικόνας σε bytes για τη Google
                     img_byte_arr = io.BytesIO()
                     img.save(img_byte_arr, format='PNG')
                     content = img_byte_arr.getvalue()
                     
-                    # 3. Κλήση στο Google Vision API
+                    # Google Vision Call
                     image = vision.Image(content=content)
                     response = client.text_detection(image=image)
                     
                     if response.text_annotations:
-                        # Το [0] περιέχει όλο το κείμενο της σελίδας
                         full_text_scan += response.text_annotations[0].description + "\n"
                 
-                # 4. Ανάλυση του κειμένου που επέστρεψε η Google
-                data = parse_google_text(full_text_scan, metrics_config)
+                # Ανάλυση με βάση τις επιλογές σου
+                data = parse_google_text(full_text_scan, active_metrics)
                 file_results.update(data)
                 
-                # 5. Προσπάθεια εύρεσης Ημερομηνίας
-                # Ψάχνουμε στο κείμενο για DD/MM/YYYY
+                # Ημερομηνία
                 date_match = re.search(r'(\d{1,2}/\d{1,2}/\d{2,4})', full_text_scan)
                 if date_match:
                     file_results['Ημερομηνία'] = date_match.group(1)
                 else:
-                    # Αν δεν βρεθεί, ψάχνουμε στο όνομα αρχείου (π.χ. ...-240115.pdf)
-                    match_file = re.search(r'[-_]?(\d{6})', file.name)
-                    if match_file:
-                        d = match_file.group(1)
+                    m_file = re.search(r'[-_]?(\d{6})', file.name)
+                    if m_file:
+                        d = m_file.group(1)
                         file_results['Ημερομηνία'] = f"{d[4:6]}/{d[2:4]}/20{d[0:2]}"
                     else:
                         file_results['Ημερομηνία'] = "Άγνωστη"
@@ -153,29 +181,28 @@ if st.button("🚀 ΑΠΟΣΤΟΛΗ ΣΤΗ GOOGLE") and uploaded_files:
                 all_data.append(file_results)
                 
             except Exception as e:
-                st.error(f"Σφάλμα στο αρχείο {file.name}: {e}")
+                st.error(f"Σφάλμα στο {file.name}: {e}")
             
             bar.progress((i + 1) / len(uploaded_files))
 
-        # --- ΕΜΦΑΝΙΣΗ ΑΠΟΤΕΛΕΣΜΑΤΩΝ ---
         if all_data:
             df = pd.DataFrame(all_data)
             
-            # Ταξινόμηση με βάση την ημερομηνία
+            # Ταξινόμηση
             try:
-                df['SortDate'] = pd.to_datetime(df['Ημερομηνία'], dayfirst=True, errors='coerce')
-                df = df.sort_values('SortDate').drop(columns=['SortDate'])
-            except: 
-                pass
+                df['Sort'] = pd.to_datetime(df['Ημερομηνία'], dayfirst=True, errors='coerce')
+                df = df.sort_values('Sort').drop(columns=['Sort'])
+            except: pass
             
-            # Φέρνουμε την Ημερομηνία πρώτη
-            cols = ['Ημερομηνία', 'Αρχείο'] + [c for c in df.columns if c not in ['Ημερομηνία', 'Αρχείο']]
-            df = df[cols]
+            # Τακτοποίηση στηλών: Ημερομηνία -> Αρχείο -> Επιλεγμένοι Δείκτες
+            desired_order = ['Ημερομηνία', 'Αρχείο'] + selected_keys
+            # Φιλτράρουμε μόνο όσες στήλες υπάρχουν όντως στο df (μήπως κάποιες δεν βρέθηκαν καθόλου)
+            final_cols = [c for c in desired_order if c in df.columns]
+            df = df[final_cols]
             
-            st.success("✅ Η Google ολοκλήρωσε την ανάγνωση!")
+            st.success(f"Βρέθηκαν δεδομένα σε {len(all_data)} αρχεία!")
             st.dataframe(df)
             
-            # Κουμπί Download Excel
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
                 df.to_excel(writer, index=False)
@@ -183,8 +210,6 @@ if st.button("🚀 ΑΠΟΣΤΟΛΗ ΣΤΗ GOOGLE") and uploaded_files:
             st.download_button(
                 "📥 Κατέβασμα Excel", 
                 data=output.getvalue(), 
-                file_name="google_vision_results.xlsx", 
+                file_name="blood_tests_results.xlsx", 
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
-    else:
-        st.warning("Δεν βρέθηκε έγκυρο κλειδί Google API στα Secrets.")
