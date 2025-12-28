@@ -1,4 +1,6 @@
 streamlit
-pdfplumber
 pandas
 openpyxl
+PyMuPDF
+google-cloud-vision
+google-auth
