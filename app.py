@@ -7,8 +7,7 @@ import io
 import re
 import scipy.stats as stats
 from fpdf import FPDF
-import matplotlib.pyplot as plt
-import matplotlib.dates as mdates
+import plotly.express as px
 import tempfile
 import os
 
@@ -28,7 +27,7 @@ h1, h2, h3 { text-align: center; }
 """, unsafe_allow_html=True)
 
 st.title("🩸 Medical Lab Commander")
-st.markdown("<h5 style='text-align: center;'>V17: Strict Only + Print PDF (Table + Chart) + PLT Default</h5>", unsafe_allow_html=True)
+st.markdown("<h5 style='text-align: center;'>V18: Strict Only + Print PDF (Table + Plotly Chart)</h5>", unsafe_allow_html=True)
 
 # =========================
 # 2) AUTH
@@ -53,7 +52,6 @@ def normalize_line(s: str) -> str:
 def clean_number(val_str: str):
     if not val_str:
         return None
-
     s = val_str.strip()
     s = s.replace('"', '').replace("'", "").replace(':', '')
     s = s.replace('*', '').replace('$', '').replace('≤', '').replace('≥', '')
@@ -105,16 +103,12 @@ def keyword_hit(line_upper: str, kw: str) -> bool:
     kw = (kw or "").upper().strip()
     if not kw:
         return False
-
     if " " in kw:
         return kw in line_upper
-
-    # Πιάνει: R B C / R.B.C / R-B-C / W B C κ.λπ.
     if 2 <= len(kw) <= 5 and re.fullmatch(r"[A-Z0-9]+", kw):
         spaced = r"\W*".join(list(map(re.escape, kw)))
         if re.search(spaced, line_upper):
             return True
-
     pattern = r"(?:^|[^A-Z0-9Α-Ω])" + re.escape(kw) + r"(?:$|[^A-Z0-9Α-Ω])"
     return re.search(pattern, line_upper) is not None
 
@@ -124,21 +118,12 @@ def pick_best_value(metric_name: str, values: list[float]):
     if not values:
         return None
 
-    # Κλείδωμα WBC ώστε να μην παίρνει ποσοστά (π.χ. 62.5)
     if "WBC" in m or "ΛΕΥΚ" in m:
         vals = [v for v in values if 0.1 <= v <= 30]
         return vals[0] if vals else None
 
     if "RBC" in m or "ΕΡΥΘ" in m:
         vals = [v for v in values if 1.0 <= v <= 8.0]
-        return vals[0] if vals else None
-
-    if "HGB" in m or "ΑΙΜΟΣΦ" in m:
-        vals = [v for v in values if 5.0 <= v <= 25.0]
-        return vals[0] if vals else None
-
-    if "HCT" in m or "ΑΙΜΑΤΟΚ" in m:
-        vals = [v for v in values if 10.0 <= v <= 70.0]
         return vals[0] if vals else None
 
     if "PLT" in m or "ΑΙΜΟΠΕΤ" in m or "PLATE" in m:
@@ -176,17 +161,14 @@ def parse_google_text_deep(full_text: str, selected_metrics: dict, debug: bool =
                 candidates = []
                 candidates += find_all_numbers(line)
 
-                # λίγο μεγαλύτερο lookahead για RBC (λόγω πινάκων)
                 max_lookahead = 10 if "RBC" in metric_name.upper() else 7
 
                 for offset in range(1, max_lookahead):
                     if i + offset >= len(lines):
                         break
-
                     nxt = lines[i + offset]
                     nxt_upper = nxt.upper()
 
-                    # STOP αν μπήκαμε σε άλλη εξέταση
                     found_other = False
                     for known_k in all_possible_keywords:
                         if known_k not in current_keywords and keyword_hit(nxt_upper, known_k):
@@ -199,7 +181,6 @@ def parse_google_text_deep(full_text: str, selected_metrics: dict, debug: bool =
 
                 picked = pick_best_value(metric_name, candidates)
 
-                # κόψε “έτη” 1990-2030 εκτός B12
                 if picked is not None and (1990 < picked < 2030) and ("B12" not in metric_name.upper()):
                     picked = None
 
@@ -223,7 +204,6 @@ def parse_google_text_deep(full_text: str, selected_metrics: dict, debug: bool =
 # =========================
 def ocr_pdf_to_text(client, pdf_bytes: bytes, dpi: int = 300) -> str:
     images = convert_from_bytes(pdf_bytes, dpi=dpi, fmt="png", grayscale=True)
-
     full_text = ""
     for img in images:
         buf = io.BytesIO()
@@ -233,14 +213,10 @@ def ocr_pdf_to_text(client, pdf_bytes: bytes, dpi: int = 300) -> str:
         image = vision.Image(content=content)
         response = client.document_text_detection(image=image)
 
-        if response.error.message:
-            st.warning(f"OCR warning: {response.error.message}")
-
         if response.full_text_annotation and response.full_text_annotation.text:
             full_text += response.full_text_annotation.text + "\n"
         elif response.text_annotations:
             full_text += response.text_annotations[0].description + "\n"
-
     return full_text
 
 def extract_date_from_text_or_filename(full_text: str, filename: str):
@@ -252,73 +228,24 @@ def extract_date_from_text_or_filename(full_text: str, filename: str):
     if m:
         d_str = m.group(1)
         return pd.to_datetime(f"{d_str[4:6]}/{d_str[2:4]}/20{d_str[0:2]}", dayfirst=True, errors='coerce')
-
     return pd.NaT
 
 # =========================
-# 5) CHART (matplotlib -> PNG bytes)
+# 5) PDF (Table + optional chart image)
 # =========================
-def make_chart_png(final_df: pd.DataFrame, metric_cols: list[str]) -> bytes | None:
-    """
-    Δημιουργεί ένα απλό line chart ανά εξέταση (όσες είναι επιλεγμένες),
-    με άξονα Χ την ημερομηνία.
-    Επιστρέφει PNG bytes για ενσωμάτωση στο PDF.
-    """
-    if final_df is None or final_df.empty:
-        return None
-    if not metric_cols:
-        return None
-
-    dfc = final_df.copy()
-    dfc["Date"] = pd.to_datetime(dfc["Date"], errors="coerce")
-    dfc = dfc.dropna(subset=["Date"]).sort_values("Date")
-
-    # κράτα μόνο στήλες που υπάρχουν και έχουν τουλάχιστον 1 τιμή
-    usable = []
-    for c in metric_cols:
-        if c in dfc.columns and pd.to_numeric(dfc[c], errors="coerce").notna().any():
-            usable.append(c)
-    if not usable:
-        return None
-
-    fig, ax = plt.subplots(figsize=(8.27, 4.5), dpi=150)  # ~A4 width, nice height
-    for c in usable:
-        y = pd.to_numeric(dfc[c], errors="coerce")
-        ax.plot(dfc["Date"], y, marker="o", linewidth=1.5, label=c)
-
-    ax.set_title("Ιστορικό Μετρήσεων")
-    ax.set_xlabel("Ημερομηνία")
-    ax.set_ylabel("Τιμή")
-
-    ax.xaxis.set_major_formatter(mdates.DateFormatter("%d/%m/%Y"))
-    fig.autofmt_xdate(rotation=45)
-
-    ax.grid(True, linestyle="--", linewidth=0.5, alpha=0.5)
-    ax.legend(loc="best", fontsize=8)
-
-    buf = io.BytesIO()
-    fig.tight_layout()
-    fig.savefig(buf, format="png")
-    plt.close(fig)
-    return buf.getvalue()
-
-# =========================
-# 6) PDF (Print-ready: Table + Chart page)
-# =========================
-def create_print_pdf(display_df: pd.DataFrame, chart_png_bytes: bytes | None, title: str = "Medical Lab Report"):
+def create_print_pdf(display_df: pd.DataFrame, chart_png_bytes: bytes | None):
     pdf = FPDF(orientation="P", unit="mm", format="A4")
     pdf.set_auto_page_break(auto=True, margin=12)
 
-    # ---- Page 1: Table ----
+    # Page 1: Table
     pdf.add_page()
     pdf.set_font("Arial", "B", 16)
-    pdf.cell(0, 10, title, ln=True, align="C")
+    pdf.cell(0, 10, "Medical Lab Report (Print)", ln=True, align="C")
     pdf.ln(2)
 
     pdf.set_font("Arial", "B", 9)
     cols = list(display_df.columns)
 
-    # widths: Date μικρό, File μεγάλο, metrics μεσαία
     col_widths = []
     for c in cols:
         if c.lower() == "date":
@@ -328,7 +255,6 @@ def create_print_pdf(display_df: pd.DataFrame, chart_png_bytes: bytes | None, ti
         else:
             col_widths.append(30)
 
-    # header
     for c, w in zip(cols, col_widths):
         pdf.cell(w, 8, str(c)[:20], border=1, align="C")
     pdf.ln()
@@ -340,20 +266,17 @@ def create_print_pdf(display_df: pd.DataFrame, chart_png_bytes: bytes | None, ti
             pdf.cell(w, 8, val[:35], border=1, align="C")
         pdf.ln()
 
-    # ---- Page 2: Chart ----
+    # Page 2: Chart (if available)
     if chart_png_bytes:
         pdf.add_page()
         pdf.set_font("Arial", "B", 13)
-        pdf.cell(0, 10, "Γράφημα", ln=True, align="C")
+        pdf.cell(0, 10, "Chart", ln=True, align="C")
         pdf.ln(2)
 
-        # write png to temp file (FPDF expects a path)
         with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
             tmp.write(chart_png_bytes)
             tmp_path = tmp.name
-
         try:
-            # fit to A4 width with margins
             pdf.image(tmp_path, x=10, w=190)
         finally:
             try:
@@ -364,49 +287,34 @@ def create_print_pdf(display_df: pd.DataFrame, chart_png_bytes: bytes | None, ti
     return pdf.output(dest="S").encode("latin-1", "ignore")
 
 # =========================
-# 7) STATS + THEORY (Pearson)
+# 6) STATS + THEORY
 # =========================
 def stats_method_explanation():
     return """
 **Μέθοδος συσχέτισης: Pearson correlation (r)**
 
-Χρησιμοποιείται όταν συγκρίνουμε **δύο συνεχείς αριθμητικές μεταβλητές** και θέλουμε να μετρήσουμε την **γραμμική** τους σχέση.
+Χρησιμοποιείται για **δύο συνεχείς αριθμητικές μεταβλητές** όταν θέλουμε τη **γραμμική** σχέση τους.
 - r ∈ [-1, +1]
-- r > 0: θετική γραμμική συσχέτιση
-- r < 0: αρνητική γραμμική συσχέτιση
-- r ≈ 0: απουσία γραμμικής συσχέτισης
+- p-value: έλεγχος H0: ρ=0
 
-**Έλεγχος σημαντικότητας (p-value):**
-- H0: ρ = 0 (καμία συσχέτιση στον πληθυσμό)
-- Αν p < 0.05: ένδειξη στατιστικά σημαντικής συσχέτισης
-
-**Γιατί επιλέχθηκε εδώ:**
-Τα εργαστηριακά μεγέθη (PLT, WBC κ.λπ.) είναι συνεχείς τιμές και η βασική ερώτηση είναι αν συν-μεταβάλλονται γραμμικά.
-
-**Περιορισμοί:**
-- Ευαισθησία σε outliers
-- Με μικρό N, η p-value είναι ασταθής
-- Αν η σχέση είναι μη-γραμμική αλλά μονοτονική, ο Pearson μπορεί να υποεκτιμήσει τη σχέση
-
-**Εναλλακτική:**
-Spearman rho (rank-based) για outliers/μη-κανονικότητα ή μονοτονική σχέση.
+Γιατί εδώ: οι εξετάσεις είναι αριθμητικές μετρήσεις και μας ενδιαφέρει αν συν-μεταβάλλονται γραμμικά.
+Περιορισμοί: outliers, μικρό N, μη γραμμική σχέση.
+Εναλλακτική: Spearman rho (rank-based) για outliers/μη-κανονικότητα ή μονοτονική σχέση.
 """
 
 def run_statistics_pearson(df, col_x, col_y):
     clean_df = df[[col_x, col_y]].apply(pd.to_numeric, errors='coerce').dropna()
     if len(clean_df) < 3:
         return f"⚠️ Χρειάζονται 3+ μετρήσεις (βρέθηκαν {len(clean_df)}).", None
-
     x = clean_df[col_x]
     y = clean_df[col_y]
     if x.std() == 0 or y.std() == 0:
-        return "⚠️ Σταθερή τιμή σε μία από τις δύο μεταβλητές (μηδενική διακύμανση).", None
-
+        return "⚠️ Σταθερή τιμή σε μία μεταβλητή.", None
     corr, p_value = stats.pearsonr(x, y)
     return {"N": len(clean_df), "Pearson r": corr, "p-value": p_value}, clean_df
 
 # =========================
-# 8) METRICS DB (Strict only)
+# 7) METRICS DB (Strict)
 # =========================
 ALL_METRICS_DB = {
     "PLT (Αιμοπετάλια)": ["PLT", "Platelets", "Αιμοπετάλια"],
@@ -426,7 +334,7 @@ ALL_METRICS_DB = {
 }
 
 # =========================
-# 9) SESSION STATE
+# 8) SESSION
 # =========================
 if "df_master" not in st.session_state:
     st.session_state.df_master = None
@@ -434,27 +342,24 @@ if "debug_master" not in st.session_state:
     st.session_state.debug_master = None
 
 # =========================
-# 10) SIDEBAR
+# 9) SIDEBAR
 # =========================
 st.sidebar.header("⚙️ Ρυθμίσεις")
 uploaded_files = st.sidebar.file_uploader("Ανέβασε PDF", type="pdf", accept_multiple_files=True)
-
 dpi = st.sidebar.slider("Ποιότητα OCR (DPI)", 200, 400, 300, 50)
 show_debug = st.sidebar.checkbox("Εμφάνιση Debug", value=False)
 
 all_keys = list(ALL_METRICS_DB.keys())
-
-# Προεπιλογή ΜΟΝΟ PLT
-default_selected = ["PLT (Αιμοπετάλια)"]
-
 selected_metric_keys = st.sidebar.multiselect(
     "Εξετάσεις:",
     all_keys,
-    default=default_selected
+    default=["PLT (Αιμοπετάλια)"]
 )
-
 active_metrics_map = {k: ALL_METRICS_DB[k] for k in selected_metric_keys}
 
+# =========================
+# 10) RUN
+# =========================
 if st.sidebar.button("🚀 START") and uploaded_files:
     client = get_vision_client()
     if not client:
@@ -512,48 +417,59 @@ if st.session_state.df_master is not None:
     st.subheader("📋 Αποτελέσματα")
     st.dataframe(display_df, use_container_width=True)
 
-    # Debug
     if st.session_state.debug_master is not None:
-        st.subheader("🧪 Debug (Διάγνωση εξαγωγής)")
+        st.subheader("🧪 Debug")
         dbg_show = st.session_state.debug_master.copy()
         dbg_show["Date"] = pd.to_datetime(dbg_show["Date"], errors="coerce").dt.strftime("%d/%m/%Y")
         st.dataframe(dbg_show[["Date", "Αρχείο", "Metric", "MatchedLine", "Candidates", "Picked"]], use_container_width=True)
 
     st.divider()
-
-    # Chart in UI
     st.subheader("📈 Γράφημα")
-    metric_cols = [c for c in cols if c not in ["Date", "Αρχείο"]]
-    chart_png = make_chart_png(final_df, metric_cols)
 
-    if chart_png:
-        st.image(chart_png, caption="Ιστορικό Μετρήσεων", use_container_width=True)
+    metric_cols = [c for c in cols if c not in ["Date", "Αρχείο"]]
+    fig = None
+    chart_png = None
+
+    if metric_cols:
+        plot_df = final_df.melt(id_vars=["Date", "Αρχείο"], var_name="Metric", value_name="Value").dropna()
+        if not plot_df.empty:
+            fig = px.line(plot_df, x="Date", y="Value", color="Metric", markers=True, title="History")
+            fig.update_layout(title_x=0.5)
+            st.plotly_chart(fig, use_container_width=True)
+
+            # Try to render chart image for PDF (needs kaleido)
+            try:
+                chart_png = fig.to_image(format="png")
+            except:
+                chart_png = None
+                st.warning("Για να μπει το γράφημα μέσα στο PDF χρειάζεται να εγκαταστήσεις το 'kaleido'.")
+
+        else:
+            st.info("Δεν υπάρχουν τιμές για γράφημα.")
     else:
-        st.info("Δεν υπάρχουν αρκετά δεδομένα για γράφημα (διάλεξε 1+ εξετάσεις με τιμές).")
+        st.info("Διάλεξε τουλάχιστον 1 εξέταση για γράφημα.")
 
     st.divider()
+    st.subheader("🖨️ Εκτύπωση (PDF)")
 
-    # PDF PRINT BUTTON (Table + Chart)
-    st.subheader("🖨️ Εκτύπωση")
-    pdf_bytes = create_print_pdf(display_df, chart_png, title="Medical Lab Report (Print)")
+    pdf_bytes = create_print_pdf(display_df, chart_png)
     st.download_button(
-        "📄 Δημιουργία PDF για Εκτύπωση (Πίνακας + Γράφημα)",
+        "📄 PDF για Εκτύπωση (Πίνακας + Γράφημα)",
         data=pdf_bytes,
         file_name="medical_lab_print.pdf",
         mime="application/pdf"
     )
 
     st.divider()
-
-    # Stats section
     st.subheader("🧮 Συσχέτιση / Στατιστική")
-    stat_cols = [c for c in cols if c not in ["Date", "Αρχείο"]]
+
+    stat_cols = metric_cols
     if len(stat_cols) >= 2:
         c1, c2 = st.columns(2)
         with c1:
-            x_ax = st.selectbox("X (μεταβλητή)", stat_cols, index=0)
+            x_ax = st.selectbox("X", stat_cols, index=0)
         with c2:
-            y_ax = st.selectbox("Y (μεταβλητή)", stat_cols, index=1)
+            y_ax = st.selectbox("Y", stat_cols, index=1)
 
         if st.button("Run Correlation"):
             if x_ax == y_ax:
