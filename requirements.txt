@@ -6,5 +6,6 @@ openpyxl
 plotly
 scipy
 statsmodels
-matplotlib
-seaborn
+xlsxwriter
+fpdf
+kaleido
