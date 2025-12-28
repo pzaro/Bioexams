@@ -1,5 +1,5 @@
 # app.py
-# Streamlit app: Extract lab values from "CSV-like quoted" PDF text and export to Excel
+# Streamlit app: Extract lab values from PDF table-like text and export to Excel
 # Libraries: streamlit, pdfplumber, pandas, re, openpyxl
 
 import re
@@ -30,16 +30,13 @@ TEST_KEYWORDS = {
     "Αιμοσφαιρίνη": ["HGB", "Αιμοσφαιρίνη"],
     "Λευκά": ["WBC", "Λευκά"],
     "Σάκχαρο": ["Σάκχαρο", "Glucose"],
-    "Χοληστερίνη": ["Χοληστερίνη"],
-    "Σίδηρος": ["Σίδηρος"],
-    "Φερριτίνη": ["Φερριτίνη"],
+    "Χοληστερίνη": ["Χοληστερίνη", "Cholesterol"],
+    "Σίδηρος": ["Σίδηρος", "Iron"],
+    "Φερριτίνη": ["Φερριτίνη", "Ferritin"],
     "B12": ["B12", "Βιταμίνη B12", "Β12"],
     "TSH": ["TSH"],
 }
 
-# Regex pattern template (critical requirement)
-# r'"[^"]*KEYWORD[^"]*"\s*,\s*"([^"]*)"'
-REGEX_TEMPLATE = r'"[^"]*{kw}[^"]*"\s*,\s*"([^"]*)"'
 
 DATE_PATTERN = re.compile(r"\b(\d{2})/(\d{2})/(\d{2}|\d{4})\b")
 
@@ -50,26 +47,22 @@ DATE_PATTERN = re.compile(r"\b(\d{2})/(\d{2})/(\d{2}|\d{4})\b")
 def extract_text_from_pdf(uploaded_file) -> str:
     """
     Read all pages text from PDF via pdfplumber.
+    Works for table-like PDFs where text is selectable (not pure scanned images).
     """
     text_parts = []
     with pdfplumber.open(uploaded_file) as pdf:
         for page in pdf.pages:
-            # extract_text may return None on some PDFs; handle gracefully
             t = page.extract_text() or ""
             text_parts.append(t)
     return "\n".join(text_parts)
 
 
-def normalize_text_for_csv_like_parsing(raw_text: str) -> str:
+def normalize_text(raw_text: str) -> str:
     """
-    Normalize whitespace while preserving quotes/commas structure.
-    PDFs often split rows with newlines, multiple spaces, etc.
+    Normalize whitespace and common PDF artifacts.
     """
-    # Replace weird non-breaking spaces, unify newlines
     t = raw_text.replace("\u00A0", " ")
-    # Collapse excessive whitespace (but keep quotes/commas intact)
     t = re.sub(r"[ \t]+", " ", t)
-    # Keep newlines as separators, but also allow regex to match across them
     return t
 
 
@@ -77,43 +70,32 @@ def clean_value_to_float_or_text(value: str):
     """
     - Remove symbols like $, * and extra spaces
     - Convert comma decimal to dot decimal
-    - Try to parse as float (supports ints too)
-    - If not numeric, return cleaned text
+    - Try parse float; else return cleaned text
     """
     if value is None:
         return None
 
     v = value.strip()
-
-    # Remove common decorations: currency, asterisks, etc.
-    # Keep digits, comma, dot, minus, plus; remove other symbols/spaces
-    # But do it cautiously: first remove obvious markers, then trim again.
     v = v.replace("$", "").replace("*", "").strip()
-
-    # If value contains thousands separators or embedded spaces, remove spaces
     v = v.replace(" ", "")
-
-    # Convert decimal comma to decimal point (e.g., "13,2" -> "13.2")
     v = v.replace(",", ".")
 
-    # Some values might be like "157**" or "7,1%" in other PDFs; strip trailing non-numeric
+    # keep only numeric-sign-dot
     v_numeric_candidate = re.sub(r"[^0-9\.\-\+]", "", v)
 
-    # Try float parse if it looks like a number
     if re.fullmatch(r"[\-\+]?\d+(\.\d+)?", v_numeric_candidate or ""):
         try:
             return float(v_numeric_candidate)
         except ValueError:
             pass
 
-    # Return as text fallback
     return v
 
 
 def find_date_in_text(raw_text: str):
     """
-    Find the first date in DD/MM/YY or DD/MM/YYYY format in the PDF text.
-    Return as ISO string YYYY-MM-DD, and also a display DD/MM/YYYY.
+    Find first date in text: DD/MM/YY or DD/MM/YYYY.
+    Return (iso_date YYYY-MM-DD, display_date DD/MM/YYYY).
     """
     m = DATE_PATTERN.search(raw_text)
     if not m:
@@ -121,7 +103,6 @@ def find_date_in_text(raw_text: str):
 
     dd, mm, yy = m.group(1), m.group(2), m.group(3)
     if len(yy) == 2:
-        # Assumption: 00-79 => 2000-2079, 80-99 => 1980-1999 (common heuristic)
         y = int(yy)
         yyyy = 2000 + y if y <= 79 else 1900 + y
     else:
@@ -136,10 +117,11 @@ def find_date_in_text(raw_text: str):
 
 def find_date_in_filename(filename: str):
     """
-    If no date in text, parse from filename like NAME-240115.pdf => 15/01/2024.
-    Accepts patterns with 6 digits (YYMMDD) or 8 digits (YYYYMMDD).
+    Parse date from filename:
+      - 8 digits (YYYYMMDD)
+      - 6 digits (YYMMDD) e.g. 240115 => 15/01/2024
+    Return (iso_date, display_date).
     """
-    # Look for 8 digits first
     m8 = re.search(r"(\d{8})", filename)
     if m8:
         s = m8.group(1)
@@ -149,7 +131,6 @@ def find_date_in_filename(filename: str):
         except ValueError:
             pass
 
-    # Look for 6 digits (YYMMDD)
     m6 = re.search(r"(\d{6})", filename)
     if m6:
         s = m6.group(1)
@@ -166,40 +147,46 @@ def find_date_in_filename(filename: str):
     return None, None
 
 
-def extract_value_for_keywords(raw_text: str, keywords: list[str]):
+def extract_value_from_table(raw_text: str, keywords: list[str]):
     """
-    Apply the critical CSV-like regex pattern per keyword.
-    Returns first match found (value string), else None.
+    Extract the first numeric value from lines that contain one of the keywords.
+    Works for table-like PDFs where text is extracted as lines, e.g.:
+      "PLT Αιμοπετάλια 106* 140-440"
+      "HGB Αιμοσφαιρίνη 12,8 12-16"
+      "WBC Λευκά Αιμοσφαίρια 9,99 4,0-10,0"
+    Strategy:
+      1) Find a line containing a keyword.
+      2) Extract the first numeric token AFTER keyword match (more robust than first number in line).
     """
-    # Make regex resilient across line breaks: allow whitespace (\s) to include \n
-    # Use DOTALL? Not required because pattern uses [^"]*, which doesn't cross quotes;
-    # but \s* around comma can cross newlines.
-    for kw in keywords:
-        safe_kw = re.escape(kw)
-        pattern = re.compile(REGEX_TEMPLATE.format(kw=safe_kw), flags=re.IGNORECASE)
-        m = pattern.search(raw_text)
-        if m:
-            return m.group(1)
+    lines = raw_text.splitlines()
+
+    for line in lines:
+        line_stripped = line.strip()
+        if not line_stripped:
+            continue
+
+        for kw in keywords:
+            if kw.lower() in line_stripped.lower():
+                # Extract numbers in order; pick the first plausible "result"
+                # Many lines begin with code/letters then value; we take the first numeric token.
+                m = re.search(r"([-+]?\d+(?:[.,]\d+)?)", line_stripped)
+                if m:
+                    return m.group(1)
+
     return None
 
 
 def build_results_dataframe(files, selected_tests, debug_mode=False):
-    """
-    For each PDF:
-      - extract all text
-      - normalize
-      - find date (text first, fallback filename)
-      - extract selected test values
-    """
     rows = []
     debug_payload = None
 
     for i, f in enumerate(files):
         filename = getattr(f, "name", "uploaded.pdf")
-        raw_text = extract_text_from_pdf(f)
-        norm_text = normalize_text_for_csv_like_parsing(raw_text)
 
-        # Debug: show first 500 chars of FIRST file text (as requested)
+        raw_text = extract_text_from_pdf(f)
+        norm_text = normalize_text(raw_text)
+
+        # Debug: show first 500 chars of first file
         if debug_mode and i == 0:
             debug_payload = norm_text[:500]
 
@@ -215,13 +202,12 @@ def build_results_dataframe(files, selected_tests, debug_mode=False):
 
         for test_name in selected_tests:
             keywords = TEST_KEYWORDS.get(test_name, [test_name])
-            raw_val = extract_value_for_keywords(norm_text, keywords)
-            cleaned = clean_value_to_float_or_text(raw_val) if raw_val is not None else None
-            row[test_name] = cleaned
+            raw_val = extract_value_from_table(norm_text, keywords)
+            row[test_name] = clean_value_to_float_or_text(raw_val) if raw_val is not None else None
 
         rows.append(row)
 
-        # Reset file pointer for safety if Streamlit reuses objects
+        # Reset pointer (Streamlit may reuse file object)
         try:
             f.seek(0)
         except Exception:
@@ -229,7 +215,7 @@ def build_results_dataframe(files, selected_tests, debug_mode=False):
 
     df = pd.DataFrame(rows)
 
-    # Sort by date if available
+    # Sort by date if possible
     if "Ημερομηνία (ISO)" in df.columns:
         df["_sort_date"] = pd.to_datetime(df["Ημερομηνία (ISO)"], errors="coerce")
         df = df.sort_values(["_sort_date", "Αρχείο"], na_position="last").drop(columns=["_sort_date"])
@@ -238,9 +224,6 @@ def build_results_dataframe(files, selected_tests, debug_mode=False):
 
 
 def dataframe_to_excel_bytes(df: pd.DataFrame) -> bytes:
-    """
-    Write dataframe to an in-memory .xlsx using openpyxl engine.
-    """
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name="Results")
@@ -254,13 +237,17 @@ st.set_page_config(page_title="Εξαγωγή Εξετάσεων από PDF σε
 
 st.title("Εξαγωγή Μικροβιολογικών Εξετάσεων από PDF σε Excel")
 st.caption(
-    "Ανιχνεύει τιμές από PDF όπου το περιεχόμενο είναι αποθηκευμένο σαν CSV με εισαγωγικά "
-    '(π.χ. "PLT Αιμοπετάλια","222","140-440").'
+    "Εξάγει τιμές από PDF που περιέχουν πίνακες (Εξέταση | Αποτέλεσμα | Τιμές αναφοράς) "
+    "και αποθηκεύει τα αποτελέσματα σε Excel."
 )
 
 with st.sidebar:
     st.header("Ρυθμίσεις")
-    debug_mode = st.toggle("Debug Mode", value=False, help="Δείχνει τους πρώτους 500 χαρακτήρες του κειμένου του 1ου αρχείου.")
+    debug_mode = st.toggle(
+        "Debug Mode",
+        value=False,
+        help="Δείχνει τους πρώτους 500 χαρακτήρες του κειμένου του 1ου αρχείου.",
+    )
     selected_tests = st.multiselect(
         "Επιλογή εξετάσεων",
         options=list(TEST_KEYWORDS.keys()),
@@ -275,7 +262,6 @@ files = st.file_uploader(
 )
 
 st.subheader("2) Εξαγωγή")
-
 run = st.button("Έναρξη Εξαγωγής", type="primary", disabled=not files or not selected_tests)
 
 if run:
@@ -304,6 +290,5 @@ if run:
 
 st.markdown("---")
 st.caption(
-    "Σημείωση: Αν κάποια τιμή δεν εντοπίζεται, συνήθως σημαίνει ότι στο συγκεκριμένο PDF "
-    "η εξέταση έχει διαφορετική ονομασία/συντομογραφία. Πρόσθεσε νέο keyword στο TEST_KEYWORDS."
+    "Αν κάποια τιμή δεν εντοπίζεται, ενεργοποίησε το Debug Mode και πρόσθεσε/διόρθωσε keywords στο TEST_KEYWORDS."
 )
