@@ -3,3 +3,8 @@ google-cloud-vision
 pdf2image
 pandas
 openpyxl
+plotly
+scipy
+statsmodels
+matplotlib
+seaborn
