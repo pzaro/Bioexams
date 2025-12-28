@@ -1,6 +1,8 @@
 # app.py
-# Streamlit app: Extract lab values from PDF table-like text and export to Excel
-# Libraries: streamlit, pdfplumber, pandas, re, openpyxl
+# Streamlit app: Extract lab values from PDF tables using word positions (pdfplumber.extract_words)
+# and export to Excel.
+#
+# Requirements: streamlit, pdfplumber, pandas, openpyxl, re
 
 import re
 from io import BytesIO
@@ -33,71 +35,21 @@ TEST_KEYWORDS = {
     "Χοληστερίνη": ["Χοληστερίνη", "Cholesterol"],
     "Σίδηρος": ["Σίδηρος", "Iron"],
     "Φερριτίνη": ["Φερριτίνη", "Ferritin"],
-    "B12": ["B12", "Βιταμίνη B12", "Β12"],
+    "B12": ["B12", "Βιταμίνη", "Β12"],
     "TSH": ["TSH"],
 }
 
-
 DATE_PATTERN = re.compile(r"\b(\d{2})/(\d{2})/(\d{2}|\d{4})\b")
 
+# Numeric token (supports comma decimal and optional trailing symbols like * )
+NUM_PATTERN = re.compile(r"^[-+]?\d+(?:[.,]\d+)?\*?$")
+
 
 # ----------------------------
-# Helpers
+# Helpers: Dates
 # ----------------------------
-def extract_text_from_pdf(uploaded_file) -> str:
-    """
-    Read all pages text from PDF via pdfplumber.
-    Works for table-like PDFs where text is selectable (not pure scanned images).
-    """
-    text_parts = []
-    with pdfplumber.open(uploaded_file) as pdf:
-        for page in pdf.pages:
-            t = page.extract_text() or ""
-            text_parts.append(t)
-    return "\n".join(text_parts)
-
-
-def normalize_text(raw_text: str) -> str:
-    """
-    Normalize whitespace and common PDF artifacts.
-    """
-    t = raw_text.replace("\u00A0", " ")
-    t = re.sub(r"[ \t]+", " ", t)
-    return t
-
-
-def clean_value_to_float_or_text(value: str):
-    """
-    - Remove symbols like $, * and extra spaces
-    - Convert comma decimal to dot decimal
-    - Try parse float; else return cleaned text
-    """
-    if value is None:
-        return None
-
-    v = value.strip()
-    v = v.replace("$", "").replace("*", "").strip()
-    v = v.replace(" ", "")
-    v = v.replace(",", ".")
-
-    # keep only numeric-sign-dot
-    v_numeric_candidate = re.sub(r"[^0-9\.\-\+]", "", v)
-
-    if re.fullmatch(r"[\-\+]?\d+(\.\d+)?", v_numeric_candidate or ""):
-        try:
-            return float(v_numeric_candidate)
-        except ValueError:
-            pass
-
-    return v
-
-
 def find_date_in_text(raw_text: str):
-    """
-    Find first date in text: DD/MM/YY or DD/MM/YYYY.
-    Return (iso_date YYYY-MM-DD, display_date DD/MM/YYYY).
-    """
-    m = DATE_PATTERN.search(raw_text)
+    m = DATE_PATTERN.search(raw_text or "")
     if not m:
         return None, None
 
@@ -116,13 +68,8 @@ def find_date_in_text(raw_text: str):
 
 
 def find_date_in_filename(filename: str):
-    """
-    Parse date from filename:
-      - 8 digits (YYYYMMDD)
-      - 6 digits (YYMMDD) e.g. 240115 => 15/01/2024
-    Return (iso_date, display_date).
-    """
-    m8 = re.search(r"(\d{8})", filename)
+    # 8 digits YYYYMMDD
+    m8 = re.search(r"(\d{8})", filename or "")
     if m8:
         s = m8.group(1)
         try:
@@ -131,7 +78,8 @@ def find_date_in_filename(filename: str):
         except ValueError:
             pass
 
-    m6 = re.search(r"(\d{6})", filename)
+    # 6 digits YYMMDD
+    m6 = re.search(r"(\d{6})", filename or "")
     if m6:
         s = m6.group(1)
         yy = int(s[0:2])
@@ -147,35 +95,185 @@ def find_date_in_filename(filename: str):
     return None, None
 
 
-def extract_value_from_table(raw_text: str, keywords: list[str]):
+# ----------------------------
+# Helpers: Cleaning
+# ----------------------------
+def clean_value_to_float_or_none(value: str):
     """
-    Extract the first numeric value from lines that contain one of the keywords.
-    Works for table-like PDFs where text is extracted as lines, e.g.:
-      "PLT Αιμοπετάλια 106* 140-440"
-      "HGB Αιμοσφαιρίνη 12,8 12-16"
-      "WBC Λευκά Αιμοσφαίρια 9,99 4,0-10,0"
-    Strategy:
-      1) Find a line containing a keyword.
-      2) Extract the first numeric token AFTER keyword match (more robust than first number in line).
+    Convert string like '106*', '12,8', '9.99' -> float.
+    Return None if not parseable.
     """
-    lines = raw_text.splitlines()
+    if value is None:
+        return None
+    v = value.strip().replace("*", "").replace(" ", "")
+    v = v.replace(",", ".")
+    v = re.sub(r"[^0-9\.\-\+]", "", v)
+    if re.fullmatch(r"[\-\+]?\d+(\.\d+)?", v or ""):
+        try:
+            return float(v)
+        except ValueError:
+            return None
+    return None
 
-    for line in lines:
-        line_stripped = line.strip()
-        if not line_stripped:
+
+def normalize_spaces(s: str) -> str:
+    return re.sub(r"\s+", " ", (s or "").replace("\u00A0", " ")).strip()
+
+
+# ----------------------------
+# PDF Extraction Core
+# ----------------------------
+def extract_debug_text(pdf_file, max_chars=800):
+    """
+    Debug: show beginning of extracted text for page 1 (if available).
+    Useful to confirm extract_text returns something.
+    """
+    try:
+        with pdfplumber.open(pdf_file) as pdf:
+            if not pdf.pages:
+                return ""
+            t = pdf.pages[0].extract_text() or ""
+            return t[:max_chars]
+    except Exception as e:
+        return f"[DEBUG ERROR] {e}"
+
+
+def words_by_line(words, y_tol=3.0):
+    """
+    Group extracted words into "lines" based on their 'top' coordinate.
+    Returns list of lines, each is a list of word dicts (sorted by x0).
+    """
+    if not words:
+        return []
+
+    # Sort by vertical position then horizontal
+    words_sorted = sorted(words, key=lambda w: (w["top"], w["x0"]))
+    lines = []
+    current = []
+    current_top = None
+
+    for w in words_sorted:
+        if current_top is None:
+            current_top = w["top"]
+            current = [w]
             continue
 
-        for kw in keywords:
-            if kw.lower() in line_stripped.lower():
-                # Extract numbers in order; pick the first plausible "result"
-                # Many lines begin with code/letters then value; we take the first numeric token.
-                m = re.search(r"([-+]?\d+(?:[.,]\d+)?)", line_stripped)
-                if m:
-                    return m.group(1)
+        if abs(w["top"] - current_top) <= y_tol:
+            current.append(w)
+        else:
+            # finalize line
+            lines.append(sorted(current, key=lambda ww: ww["x0"]))
+            current_top = w["top"]
+            current = [w]
+
+    if current:
+        lines.append(sorted(current, key=lambda ww: ww["x0"]))
+
+    return lines
+
+
+def line_text(line_words):
+    return normalize_spaces(" ".join(w["text"] for w in line_words))
+
+
+def is_numeric_token(token: str) -> bool:
+    t = (token or "").strip()
+    return bool(NUM_PATTERN.match(t))
+
+
+def extract_value_from_pdf_tables(pdf_file, keywords: list[str], y_tol=3.0):
+    """
+    Robust extraction for table PDFs:
+      - Use page.extract_words() to preserve positions.
+      - Find a line that contains one of the keywords.
+      - From that same line, pick the first numeric token to the RIGHT of the keyword (by x position).
+    Returns first found numeric string token (e.g., '106*', '12,8', '9,99') or None.
+    """
+    kw_lower = [k.lower() for k in keywords]
+
+    try:
+        with pdfplumber.open(pdf_file) as pdf:
+            for page in pdf.pages:
+                # Extract words with positions
+                words = page.extract_words(
+                    keep_blank_chars=False,
+                    use_text_flow=True,  # helps some PDFs preserve reading order
+                )
+                lines = words_by_line(words, y_tol=y_tol)
+
+                for lw in lines:
+                    txt = line_text(lw).lower()
+                    if not txt:
+                        continue
+
+                    # Find which keyword matches this line
+                    matched_kw = None
+                    for k in kw_lower:
+                        if k in txt:
+                            matched_kw = k
+                            break
+                    if not matched_kw:
+                        continue
+
+                    # Identify keyword span: approximate by finding first word that contains keyword substring
+                    # then use its x1 as left boundary for result tokens.
+                    boundary_x = None
+                    for w in lw:
+                        if matched_kw in w["text"].lower():
+                            boundary_x = w["x1"]
+                            break
+
+                    # If keyword spans multiple words (e.g., "Λευκά Αιμοσφαίρια"), boundary might be early;
+                    # improve: set boundary to the max x1 of all words participating in the keyword phrase.
+                    # Simple heuristic: extend boundary for adjacent words until line still contains keyword tokens.
+                    if boundary_x is None:
+                        boundary_x = lw[0]["x1"]
+
+                    # Candidate numeric tokens on the right side
+                    candidates = []
+                    for w in lw:
+                        if w["x0"] > boundary_x + 5:  # small gap
+                            if is_numeric_token(w["text"]):
+                                candidates.append((w["x0"], w["text"]))
+
+                    # If found numeric candidates, take the leftmost one (result column)
+                    if candidates:
+                        candidates.sort(key=lambda x: x[0])
+                        return candidates[0][1]
+
+                    # Fallback: sometimes value is not a standalone word token (e.g., "106*" glued),
+                    # or split weirdly. Try regex over whole line and take first numeric.
+                    m = re.search(r"([-+]?\d+(?:[.,]\d+)?\*?)", line_text(lw))
+                    if m:
+                        return m.group(1)
+
+    except Exception:
+        # If pdfplumber fails, return None (handled upstream)
+        return None
 
     return None
 
 
+def extract_date_from_pdf(pdf_file):
+    """
+    Try extract date from full text across all pages.
+    """
+    try:
+        with pdfplumber.open(pdf_file) as pdf:
+            full_text = []
+            for page in pdf.pages:
+                full_text.append(page.extract_text() or "")
+            all_text = "\n".join(full_text)
+    except Exception:
+        return None, None
+
+    iso_date, disp = find_date_in_text(all_text)
+    return iso_date, disp
+
+
+# ----------------------------
+# Build Results
+# ----------------------------
 def build_results_dataframe(files, selected_tests, debug_mode=False):
     rows = []
     debug_payload = None
@@ -183,39 +281,36 @@ def build_results_dataframe(files, selected_tests, debug_mode=False):
     for i, f in enumerate(files):
         filename = getattr(f, "name", "uploaded.pdf")
 
-        raw_text = extract_text_from_pdf(f)
-        norm_text = normalize_text(raw_text)
-
-        # Debug: show first 500 chars of first file
+        # Debug: show extract_text snippet from first file
         if debug_mode and i == 0:
-            debug_payload = norm_text[:500]
+            debug_payload = extract_debug_text(f, max_chars=800)
 
-        iso_date, display_date = find_date_in_text(norm_text)
+        # Date: prefer PDF text; fallback to filename
+        iso_date, disp_date = extract_date_from_pdf(f)
         if not iso_date:
-            iso_date, display_date = find_date_in_filename(filename)
+            iso_date, disp_date = find_date_in_filename(filename)
 
         row = {
             "Αρχείο": filename,
             "Ημερομηνία (ISO)": iso_date,
-            "Ημερομηνία": display_date,
+            "Ημερομηνία": disp_date,
         }
 
         for test_name in selected_tests:
             keywords = TEST_KEYWORDS.get(test_name, [test_name])
-            raw_val = extract_value_from_table(norm_text, keywords)
-            row[test_name] = clean_value_to_float_or_text(raw_val) if raw_val is not None else None
+
+            raw_val = extract_value_from_pdf_tables(f, keywords, y_tol=3.0)
+            row[test_name] = clean_value_to_float_or_none(raw_val)
 
         rows.append(row)
 
-        # Reset pointer (Streamlit may reuse file object)
+        # Reset pointer for Streamlit re-reads
         try:
             f.seek(0)
         except Exception:
             pass
 
     df = pd.DataFrame(rows)
-
-    # Sort by date if possible
     if "Ημερομηνία (ISO)" in df.columns:
         df["_sort_date"] = pd.to_datetime(df["Ημερομηνία (ISO)"], errors="coerce")
         df = df.sort_values(["_sort_date", "Αρχείο"], na_position="last").drop(columns=["_sort_date"])
@@ -237,8 +332,8 @@ st.set_page_config(page_title="Εξαγωγή Εξετάσεων από PDF σε
 
 st.title("Εξαγωγή Μικροβιολογικών Εξετάσεων από PDF σε Excel")
 st.caption(
-    "Εξάγει τιμές από PDF που περιέχουν πίνακες (Εξέταση | Αποτέλεσμα | Τιμές αναφοράς) "
-    "και αποθηκεύει τα αποτελέσματα σε Excel."
+    "Για PDF που είναι πίνακες (Εξέταση | Αποτέλεσμα | Τιμές αναφοράς). "
+    "Η εξαγωγή γίνεται με θέσεις λέξεων (x/y) ώστε να πιάνει αξιόπιστα το αποτέλεσμα."
 )
 
 with st.sidebar:
@@ -246,7 +341,7 @@ with st.sidebar:
     debug_mode = st.toggle(
         "Debug Mode",
         value=False,
-        help="Δείχνει τους πρώτους 500 χαρακτήρες του κειμένου του 1ου αρχείου.",
+        help="Δείχνει τους πρώτους ~800 χαρακτήρες του extract_text() της 1ης σελίδας του 1ου αρχείου.",
     )
     selected_tests = st.multiselect(
         "Επιλογή εξετάσεων",
@@ -273,9 +368,9 @@ if run:
         with st.spinner("Εξάγω δεδομένα από τα PDF..."):
             df, debug_payload = build_results_dataframe(files, selected_tests, debug_mode=debug_mode)
 
-        if debug_mode and debug_payload is not None:
-            st.markdown("### Debug Output (πρώτοι 500 χαρακτήρες)")
-            st.code(debug_payload)
+        if debug_mode:
+            st.markdown("### Debug Output (extract_text από 1η σελίδα / 1ο αρχείο)")
+            st.code(debug_payload or "")
 
         st.markdown("### Αποτελέσματα")
         st.dataframe(df, use_container_width=True)
@@ -290,5 +385,7 @@ if run:
 
 st.markdown("---")
 st.caption(
-    "Αν κάποια τιμή δεν εντοπίζεται, ενεργοποίησε το Debug Mode και πρόσθεσε/διόρθωσε keywords στο TEST_KEYWORDS."
+    "Αν κάποια τιμή δεν εντοπίζεται, συνήθως οφείλεται σε διαφορετική ονομασία/συντομογραφία. "
+    "Πρόσθεσε keyword στο TEST_KEYWORDS. Αν πάλι δεν πιάνει, θα χρειαστεί μικρή ρύθμιση του y_tol ή "
+    "του κανόνα επιλογής της τιμής (αποτέλεσμα vs reference)."
 )
