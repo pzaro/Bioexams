@@ -1,6 +1,5 @@
 streamlit
+google-cloud-vision
+pdf2image
 pandas
 openpyxl
-PyMuPDF
-google-cloud-vision
-google-auth
