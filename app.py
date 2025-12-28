@@ -1,17 +1,12 @@
 # ============================================================
-# Medical Lab Commander — V20 (Streamlit Cloud-ready)
+# Medical Lab Commander — V21 (Streamlit Cloud-ready)
 # Strict-only extraction (NO auto extract)
-# - OCR via Google Vision (document_text_detection)
-# - Robust keyword matching (handles R B C / R.B.C etc.)
-# - Robust value picking (prevents WBC=percent mistakes)
-# - Defaults: ONLY PLT (Αιμοπετάλια)
-# - PDF Print: Table + Chart
-#   * Greek-safe PDF via fpdf2 + DejaVu fonts (supports:
-#       - BASE_DIR/Fonts/DejaVuSans.ttf  (your current structure)
-#       - BASE_DIR/fonts/DejaVuSans.ttf
-#       - BASE_DIR/DejaVuSans.ttf
-#     same for Bold
-#   * Chart embedded via Plotly -> PNG (requires kaleido)
+# Fixes included:
+# - Font resolver supports your folder: Bioexams/Fonts/
+# - Diagnostics shows all relevant paths
+# - PDF Greek-safe with fpdf2 + DejaVu fonts
+# - Chart in PDF via Plotly -> PNG (requires kaleido)
+# - Default metric: ONLY PLT (Αιμοπετάλια)
 # - Stats: Pearson correlation + theory explanation
 # ============================================================
 
@@ -44,7 +39,7 @@ h1, h2, h3 { text-align: center; }
 """, unsafe_allow_html=True)
 
 st.title("🩸 Medical Lab Commander")
-st.markdown("<h5 style='text-align: center;'>V20: Strict Only + Greek PDF + Chart in PDF</h5>", unsafe_allow_html=True)
+st.markdown("<h5 style='text-align: center;'>V21: Strict Only + Greek PDF + Chart in PDF (Bioexams/Fonts)</h5>", unsafe_allow_html=True)
 
 # -------------------------
 # 2) AUTH (GCP Vision)
@@ -220,7 +215,6 @@ def parse_google_text_deep(full_text: str, selected_metrics: dict, debug: bool =
                 candidates = []
                 candidates += find_all_numbers(line)
 
-                # bigger lookahead for RBC (tables often split)
                 max_lookahead = 10 if "RBC" in metric_name.upper() else 7
 
                 for offset in range(1, max_lookahead):
@@ -230,7 +224,6 @@ def parse_google_text_deep(full_text: str, selected_metrics: dict, debug: bool =
                     nxt = lines[i + offset]
                     nxt_upper = nxt.upper()
 
-                    # STOP if another metric starts
                     found_other = False
                     for known_k in all_possible_keywords:
                         if known_k not in current_keywords and keyword_hit(nxt_upper, known_k):
@@ -320,19 +313,27 @@ def plotly_to_png_bytes(fig) -> bytes | None:
         return None
 
 # -------------------------
-# 10) FONT RESOLUTION (supports Bioexams/Fonts/)
+# 10) FONT RESOLUTION (Bioexams/Fonts supported)
 # -------------------------
 def resolve_font_paths() -> tuple[str, str | None]:
     """
-    Returns (regular_font_path, bold_font_path_or_None)
-    Supports these locations (relative to app.py folder):
-      1) BASE_DIR/Fonts/DejaVuSans.ttf
-      2) BASE_DIR/fonts/DejaVuSans.ttf
-      3) BASE_DIR/DejaVuSans.ttf
+    Resolves DejaVu fonts from multiple candidate locations.
+
+    Your current folder:
+      Bioexams/Fonts/DejaVuSans.ttf
+
+    This function supports:
+      1) BASE_DIR/Bioexams/Fonts/DejaVuSans.ttf
+      2) BASE_DIR/Fonts/DejaVuSans.ttf
+      3) BASE_DIR/fonts/DejaVuSans.ttf
+      4) BASE_DIR/DejaVuSans.ttf
     """
     base_dir = os.path.dirname(os.path.abspath(__file__))
 
     candidates = [
+        (os.path.join(base_dir, "Bioexams", "Fonts", "DejaVuSans.ttf"),
+         os.path.join(base_dir, "Bioexams", "Fonts", "DejaVuSans-Bold.ttf")),
+
         (os.path.join(base_dir, "Fonts", "DejaVuSans.ttf"),
          os.path.join(base_dir, "Fonts", "DejaVuSans-Bold.ttf")),
 
@@ -343,24 +344,14 @@ def resolve_font_paths() -> tuple[str, str | None]:
          os.path.join(base_dir, "DejaVuSans-Bold.ttf")),
     ]
 
-    regular = None
-    bold = None
-    for fr, fb in candidates:
-        if os.path.exists(fr):
-            regular = fr
-            bold = fb if os.path.exists(fb) else None
-            break
+    for regular, bold in candidates:
+        if os.path.exists(regular):
+            return regular, bold if os.path.exists(bold) else None
 
-    if not regular:
-        raise FileNotFoundError(
-            "Δεν βρέθηκε το DejaVuSans.ttf. Βεβαιώσου ότι υπάρχει σε ένα από τα:\n"
-            "- Bioexams/Fonts/DejaVuSans.ttf\n"
-            "- fonts/DejaVuSans.ttf\n"
-            "- root δίπλα στο app.py\n"
-            "και ότι το όνομα αρχείου είναι ακριβώς με σωστά κεφαλαία/μικρά."
-        )
-
-    return regular, bold
+    raise FileNotFoundError(
+        "Δεν βρέθηκε DejaVuSans.ttf. Έλεγξε ότι υπάρχει στο Bioexams/Fonts/ "
+        "και ότι τα κεφαλαία/μικρά στο path είναι ακριβώς σωστά."
+    )
 
 # -------------------------
 # 11) PDF (Greek-safe via fpdf2 + DejaVu fonts)
@@ -369,7 +360,7 @@ def create_print_pdf(display_df: pd.DataFrame, chart_png_bytes: bytes | None):
     """
     Requires:
       - fpdf2 installed (requirements.txt -> fpdf2)
-      - DejaVu fonts present (your case: BASE_DIR/Fonts/)
+      - DejaVu fonts present in one of the supported folders
     """
     pdf = FPDF(orientation="P", unit="mm", format="A4")
     pdf.set_auto_page_break(auto=True, margin=12)
@@ -431,7 +422,6 @@ def create_print_pdf(display_df: pd.DataFrame, chart_png_bytes: bytes | None):
             except:
                 pass
 
-    # fpdf2 returns a str in latin-1 for dest="S"
     return pdf.output(dest="S").encode("latin-1")
 
 # -------------------------
@@ -475,7 +465,7 @@ def run_statistics_pearson(df, col_x, col_y):
     return {"N": len(clean_df), "Pearson r": corr, "p-value": p_value}, clean_df
 
 # -------------------------
-# 13) METRICS DB (extend as needed)
+# 13) METRICS DB
 # -------------------------
 ALL_METRICS_DB = {
     "PLT (Αιμοπετάλια)": ["PLT", "Platelets", "Αιμοπετάλια"],
@@ -513,7 +503,6 @@ show_debug = st.sidebar.checkbox("Εμφάνιση Debug", value=False)
 
 all_keys = list(ALL_METRICS_DB.keys())
 
-# Default only PLT
 selected_metric_keys = st.sidebar.multiselect(
     "Εξετάσεις:",
     all_keys,
@@ -521,15 +510,30 @@ selected_metric_keys = st.sidebar.multiselect(
 )
 active_metrics_map = {k: ALL_METRICS_DB[k] for k in selected_metric_keys}
 
-# Diagnostics expander (you can remove after stabilizing)
+# Diagnostics expander
 with st.sidebar.expander("🔎 Diagnostics (optional)"):
     base_dir = os.path.dirname(os.path.abspath(__file__))
     st.write("BASE_DIR:", base_dir)
+
+    # show likely locations
+    st.write("Exists BASE_DIR/Bioexams/Fonts:", os.path.exists(os.path.join(base_dir, "Bioexams", "Fonts")))
+    st.write("Exists BASE_DIR/Bioexams/Fonts/DejaVuSans.ttf:", os.path.exists(os.path.join(base_dir, "Bioexams", "Fonts", "DejaVuSans.ttf")))
+
     st.write("Exists BASE_DIR/Fonts:", os.path.exists(os.path.join(base_dir, "Fonts")))
     st.write("Exists BASE_DIR/Fonts/DejaVuSans.ttf:", os.path.exists(os.path.join(base_dir, "Fonts", "DejaVuSans.ttf")))
+
     st.write("Exists BASE_DIR/fonts:", os.path.exists(os.path.join(base_dir, "fonts")))
     st.write("Exists BASE_DIR/fonts/DejaVuSans.ttf:", os.path.exists(os.path.join(base_dir, "fonts", "DejaVuSans.ttf")))
+
     st.write("Exists BASE_DIR/DejaVuSans.ttf:", os.path.exists(os.path.join(base_dir, "DejaVuSans.ttf")))
+
+    # show what resolver will pick
+    try:
+        fr, fb = resolve_font_paths()
+        st.success(f"Resolver picked: {fr}")
+        st.write("Bold:", fb if fb else "(no bold found)")
+    except Exception as e:
+        st.error(str(e))
 
 # -------------------------
 # 16) RUN EXTRACTION
@@ -591,7 +595,6 @@ if st.session_state.df_master is not None:
     st.subheader("📋 Αποτελέσματα")
     st.dataframe(display_df, use_container_width=True)
 
-    # Debug
     if st.session_state.debug_master is not None:
         st.subheader("🧪 Debug (Διάγνωση εξαγωγής)")
         dbg_show = st.session_state.debug_master.copy()
@@ -603,7 +606,6 @@ if st.session_state.df_master is not None:
 
     st.divider()
 
-    # Chart
     st.subheader("📈 Γράφημα")
     metric_cols = [c for c in cols if c not in ["Date", "Αρχείο"]]
 
@@ -624,7 +626,6 @@ if st.session_state.df_master is not None:
 
     st.divider()
 
-    # Print PDF (Table + Chart)
     st.subheader("🖨️ Εκτύπωση (PDF)")
     try:
         pdf_bytes = create_print_pdf(display_df, chart_png)
@@ -639,13 +640,12 @@ if st.session_state.df_master is not None:
         st.info(
             "Έλεγξε:\n"
             "1) requirements.txt: fpdf2, plotly, kaleido\n"
-            "2) Fonts: Bioexams/Fonts/DejaVuSans.ttf (ή fonts/ ή root)\n"
+            "2) Fonts: Bioexams/Fonts/DejaVuSans.ttf (ή άλλη υποστηριζόμενη θέση)\n"
             "3) Ονόματα αρχείων με σωστά κεφαλαία/μικρά."
         )
 
     st.divider()
 
-    # Stats
     st.subheader("🧮 Συσχέτιση / Στατιστική")
     if len(metric_cols) >= 2:
         c1, c2 = st.columns(2)
