@@ -1,13 +1,14 @@
 # ============================================================
-# Medical Lab Commander — V21 (Streamlit Cloud-ready)
-# Strict-only extraction (NO auto extract)
-# Fixes included:
-# - Font resolver supports your folder: Bioexams/Fonts/
-# - Diagnostics shows all relevant paths
-# - PDF Greek-safe with fpdf2 + DejaVu fonts
-# - Chart in PDF via Plotly -> PNG (requires kaleido)
+# Medical Lab Commander — FINAL (V22)
+# - Strict-only extraction (NO auto extract)
+# - OCR via Google Vision (document_text_detection)
+# - Robust keyword matching + value picking (avoids WBC%=62.5 mistakes)
 # - Default metric: ONLY PLT (Αιμοπετάλια)
-# - Stats: Pearson correlation + theory explanation
+# - PDF Print button: Table + Chart
+#   * Greek-safe PDF via fpdf2 + DejaVu fonts
+#   * Fonts supported in: Bioexams/Fonts/ OR Fonts/ OR fonts/ OR root
+#   * Plotly chart embedded as PNG (requires kaleido)
+# - Correlation: Pearson + theory explanation
 # ============================================================
 
 import streamlit as st
@@ -39,7 +40,7 @@ h1, h2, h3 { text-align: center; }
 """, unsafe_allow_html=True)
 
 st.title("🩸 Medical Lab Commander")
-st.markdown("<h5 style='text-align: center;'>V21: Strict Only + Greek PDF + Chart in PDF (Bioexams/Fonts)</h5>", unsafe_allow_html=True)
+st.markdown("<h5 style='text-align: center;'>FINAL V22: Greek PDF + Chart + Strict OCR</h5>", unsafe_allow_html=True)
 
 # -------------------------
 # 2) AUTH (GCP Vision)
@@ -69,37 +70,28 @@ def clean_number(val_str: str):
         return None
 
     s = val_str.strip()
-
-    # Remove junk
     s = s.replace('"', '').replace("'", "").replace(':', '')
     s = s.replace('*', '').replace('$', '').replace('≤', '').replace('≥', '')
     s = s.replace('<', '').replace('>', '')
-    s = s.replace('O', '0').replace('o', '0')  # OCR
-    s = s.replace('–', '-').replace('−', '-')  # minus variants
-
-    # Keep only digits + separators + minus
+    s = s.replace('O', '0').replace('o', '0')
+    s = s.replace('–', '-').replace('−', '-')
     s = re.sub(r"[^0-9,.\-]", "", s)
 
-    # If both separators exist, infer decimal by last occurrence
     if "," in s and "." in s:
         last_comma = s.rfind(",")
         last_dot = s.rfind(".")
         if last_comma > last_dot:
-            # Greek: 1.234,56
             s = s.replace(".", "")
             s = s.replace(",", ".")
         else:
-            # US: 1,234.56
             s = s.replace(",", "")
     else:
-        # Only comma: treat as decimal
         if "," in s and "." not in s:
             s = s.replace(".", "")
             s = s.replace(",", ".")
 
     s = s.strip()
 
-    # minus cleanup
     if s.count("-") > 1:
         s = s.replace("-", "")
     if "-" in s and not s.startswith("-"):
@@ -114,12 +106,10 @@ def find_all_numbers(s: str):
     if not s:
         return []
     s_clean = s.replace('"', ' ').replace("'", " ").replace(':', ' ')
-
     candidates = re.findall(
         r"[-]?\d{1,3}(?:[.,]\d{3})*(?:[.,]\d+)?|[-]?\d+(?:[.,]\d+)?",
         s_clean
     )
-
     out = []
     for c in candidates:
         v = clean_number(c)
@@ -135,23 +125,19 @@ def keyword_hit(line_upper: str, kw: str) -> bool:
     if not kw:
         return False
 
-    # phrases
     if " " in kw:
         return kw in line_upper
 
-    # short tokens: match even if OCR inserts punctuation/spaces
-    # e.g., RBC -> R B C / R.B.C / R-B-C
     if 2 <= len(kw) <= 5 and re.fullmatch(r"[A-Z0-9]+", kw):
         spaced = r"\W*".join(list(map(re.escape, kw)))
         if re.search(spaced, line_upper):
             return True
 
-    # boundary-ish match for Greek/Latin
     pattern = r"(?:^|[^A-Z0-9Α-Ω])" + re.escape(kw) + r"(?:$|[^A-Z0-9Α-Ω])"
     return re.search(pattern, line_upper) is not None
 
 # -------------------------
-# 6) VALUE PICKING (prevents common OCR column mix-ups)
+# 6) VALUE PICKING
 # -------------------------
 def pick_best_value(metric_name: str, values: list[float]):
     m = (metric_name or "").upper()
@@ -159,7 +145,7 @@ def pick_best_value(metric_name: str, values: list[float]):
     if not values:
         return None
 
-    # Prevent WBC taking % values (e.g., 62.5)
+    # WBC should not be 60-80 (that's typically differential %)
     if "WBC" in m or "ΛΕΥΚ" in m:
         vals = [v for v in values if 0.1 <= v <= 30]
         return vals[0] if vals else None
@@ -181,7 +167,6 @@ def pick_best_value(metric_name: str, values: list[float]):
         ints = [v for v in vals if abs(v - round(v)) < 1e-6]
         return ints[0] if ints else (vals[0] if vals else None)
 
-    # default: first candidate
     return values[0]
 
 # -------------------------
@@ -205,11 +190,9 @@ def parse_google_text_deep(full_text: str, selected_metrics: dict, debug: bool =
 
         found_at_line = ""
         candidates = []
-        picked = None
 
         for i, line in enumerate(lines):
             line_upper = line.upper()
-
             if any(keyword_hit(line_upper, k) for k in current_keywords):
                 found_at_line = line
                 candidates = []
@@ -220,10 +203,10 @@ def parse_google_text_deep(full_text: str, selected_metrics: dict, debug: bool =
                 for offset in range(1, max_lookahead):
                     if i + offset >= len(lines):
                         break
-
                     nxt = lines[i + offset]
                     nxt_upper = nxt.upper()
 
+                    # STOP if another metric starts
                     found_other = False
                     for known_k in all_possible_keywords:
                         if known_k not in current_keywords and keyword_hit(nxt_upper, known_k):
@@ -236,13 +219,11 @@ def parse_google_text_deep(full_text: str, selected_metrics: dict, debug: bool =
 
                 picked = pick_best_value(metric_name, candidates)
 
-                # block year-like numbers, except B12
                 if picked is not None and (1990 < picked < 2030) and ("B12" not in metric_name.upper()):
                     picked = None
 
                 if picked is not None:
                     results[metric_name] = picked
-
                 break
 
         if debug:
@@ -313,16 +294,11 @@ def plotly_to_png_bytes(fig) -> bytes | None:
         return None
 
 # -------------------------
-# 10) FONT RESOLUTION (Bioexams/Fonts supported)
+# 10) FONT RESOLUTION (supports Bioexams/Fonts/)
 # -------------------------
 def resolve_font_paths() -> tuple[str, str | None]:
     """
-    Resolves DejaVu fonts from multiple candidate locations.
-
-    Your current folder:
-      Bioexams/Fonts/DejaVuSans.ttf
-
-    This function supports:
+    Looks for DejaVuSans.ttf in these locations relative to app.py folder:
       1) BASE_DIR/Bioexams/Fonts/DejaVuSans.ttf
       2) BASE_DIR/Fonts/DejaVuSans.ttf
       3) BASE_DIR/fonts/DejaVuSans.ttf
@@ -349,24 +325,19 @@ def resolve_font_paths() -> tuple[str, str | None]:
             return regular, bold if os.path.exists(bold) else None
 
     raise FileNotFoundError(
-        "Δεν βρέθηκε DejaVuSans.ttf. Έλεγξε ότι υπάρχει στο Bioexams/Fonts/ "
-        "και ότι τα κεφαλαία/μικρά στο path είναι ακριβώς σωστά."
+        "Missing font file: DejaVuSans.ttf. "
+        "Βεβαιώσου ότι υπάρχει στο Bioexams/Fonts/ ή Fonts/ ή fonts/ ή δίπλα στο app.py "
+        "και ότι τα κεφαλαία/μικρά είναι ακριβώς σωστά."
     )
 
 # -------------------------
-# 11) PDF (Greek-safe via fpdf2 + DejaVu fonts)
+# 11) PDF (Greek-safe) + FIXED bytearray output
 # -------------------------
 def create_print_pdf(display_df: pd.DataFrame, chart_png_bytes: bytes | None):
-    """
-    Requires:
-      - fpdf2 installed (requirements.txt -> fpdf2)
-      - DejaVu fonts present in one of the supported folders
-    """
     pdf = FPDF(orientation="P", unit="mm", format="A4")
     pdf.set_auto_page_break(auto=True, margin=12)
 
     font_regular, font_bold = resolve_font_paths()
-
     pdf.add_font("DejaVu", "", font_regular, uni=True)
     has_bold = font_bold is not None
     if has_bold:
@@ -422,9 +393,9 @@ def create_print_pdf(display_df: pd.DataFrame, chart_png_bytes: bytes | None):
             except:
                 pass
 
-out = pdf.output(dest="S")
-return bytes(out) if isinstance(out, (bytes, bytearray)) else out.encode("latin-1")
-
+    # ✅ Works for both str and bytearray returns of fpdf2
+    out = pdf.output(dest="S")
+    return bytes(out) if isinstance(out, (bytes, bytearray)) else out.encode("latin-1")
 
 # -------------------------
 # 12) STATS (Pearson) + THEORY
@@ -442,7 +413,7 @@ def stats_method_explanation():
 - Αν p < 0.05: ένδειξη στατιστικά σημαντικής συσχέτισης
 
 **Γιατί επιλέχθηκε εδώ:**  
-Οι εξετάσεις είναι αριθμητικές/συνεχείς και θέλουμε αρχικά έναν “baseline” έλεγχο γραμμικής συσχέτισης.
+Οι εξετάσεις είναι αριθμητικές/συνεχείς και θέλουμε αρχικά έναν baseline έλεγχο γραμμικής συσχέτισης.
 
 **Προϋποθέσεις / caveats:**  
 - ευαισθησία σε outliers  
@@ -503,33 +474,24 @@ uploaded_files = st.sidebar.file_uploader("Ανέβασε PDF", type="pdf", acce
 dpi = st.sidebar.slider("Ποιότητα OCR (DPI)", 200, 400, 300, 50)
 show_debug = st.sidebar.checkbox("Εμφάνιση Debug", value=False)
 
-all_keys = list(ALL_METRICS_DB.keys())
-
 selected_metric_keys = st.sidebar.multiselect(
     "Εξετάσεις:",
-    all_keys,
+    list(ALL_METRICS_DB.keys()),
     default=["PLT (Αιμοπετάλια)"]
 )
 active_metrics_map = {k: ALL_METRICS_DB[k] for k in selected_metric_keys}
 
-# Diagnostics expander
 with st.sidebar.expander("🔎 Diagnostics (optional)"):
     base_dir = os.path.dirname(os.path.abspath(__file__))
     st.write("BASE_DIR:", base_dir)
-
-    # show likely locations
-    st.write("Exists BASE_DIR/Bioexams/Fonts:", os.path.exists(os.path.join(base_dir, "Bioexams", "Fonts")))
-    st.write("Exists BASE_DIR/Bioexams/Fonts/DejaVuSans.ttf:", os.path.exists(os.path.join(base_dir, "Bioexams", "Fonts", "DejaVuSans.ttf")))
-
-    st.write("Exists BASE_DIR/Fonts:", os.path.exists(os.path.join(base_dir, "Fonts")))
-    st.write("Exists BASE_DIR/Fonts/DejaVuSans.ttf:", os.path.exists(os.path.join(base_dir, "Fonts", "DejaVuSans.ttf")))
-
-    st.write("Exists BASE_DIR/fonts:", os.path.exists(os.path.join(base_dir, "fonts")))
-    st.write("Exists BASE_DIR/fonts/DejaVuSans.ttf:", os.path.exists(os.path.join(base_dir, "fonts", "DejaVuSans.ttf")))
-
-    st.write("Exists BASE_DIR/DejaVuSans.ttf:", os.path.exists(os.path.join(base_dir, "DejaVuSans.ttf")))
-
-    # show what resolver will pick
+    st.write("Exists BASE_DIR/Bioexams/Fonts/DejaVuSans.ttf:",
+             os.path.exists(os.path.join(base_dir, "Bioexams", "Fonts", "DejaVuSans.ttf")))
+    st.write("Exists BASE_DIR/Fonts/DejaVuSans.ttf:",
+             os.path.exists(os.path.join(base_dir, "Fonts", "DejaVuSans.ttf")))
+    st.write("Exists BASE_DIR/fonts/DejaVuSans.ttf:",
+             os.path.exists(os.path.join(base_dir, "fonts", "DejaVuSans.ttf")))
+    st.write("Exists BASE_DIR/DejaVuSans.ttf:",
+             os.path.exists(os.path.join(base_dir, "DejaVuSans.ttf")))
     try:
         fr, fb = resolve_font_paths()
         st.success(f"Resolver picked: {fr}")
@@ -601,10 +563,8 @@ if st.session_state.df_master is not None:
         st.subheader("🧪 Debug (Διάγνωση εξαγωγής)")
         dbg_show = st.session_state.debug_master.copy()
         dbg_show["Date"] = pd.to_datetime(dbg_show["Date"], errors="coerce").dt.strftime("%d/%m/%Y")
-        st.dataframe(
-            dbg_show[["Date", "Αρχείο", "Metric", "MatchedLine", "Candidates", "Picked"]],
-            use_container_width=True
-        )
+        st.dataframe(dbg_show[["Date", "Αρχείο", "Metric", "MatchedLine", "Candidates", "Picked"]],
+                     use_container_width=True)
 
     st.divider()
 
@@ -661,8 +621,8 @@ if st.session_state.df_master is not None:
                 st.warning("Διάλεξε δύο διαφορετικές μεταβλητές.")
             else:
                 st.markdown(stats_method_explanation())
-                res, clean_df2 = run_statistics_pearson(final_df, x_ax, y_ax)
-                if clean_df2 is None:
+                res, _ = run_statistics_pearson(final_df, x_ax, y_ax)
+                if isinstance(res, str):
                     st.warning(res)
                 else:
                     st.write({
@@ -672,4 +632,3 @@ if st.session_state.df_master is not None:
                     })
     else:
         st.info("Για συσχέτιση χρειάζονται τουλάχιστον 2 επιλεγμένες εξετάσεις.")
-
