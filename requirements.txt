@@ -1,11 +1,10 @@
 streamlit
 google-cloud-vision
+google-auth
 pdf2image
 pandas
-openpyxl
-plotly
 scipy
 statsmodels
-xlsxwriter
 fpdf
-kaleido
+matplotlib
+Pillow
