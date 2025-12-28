@@ -12,7 +12,7 @@ from fpdf import FPDF
 import tempfile
 import os
 
-# --- 1. CONFIG & CSS ---
+# --- 1. SETUP & DESIGN ---
 st.set_page_config(page_title="Medical Lab Commander", layout="wide")
 
 st.markdown("""
@@ -23,7 +23,7 @@ st.markdown("""
         font-family: 'Roboto', sans-serif;
     }
 
-    /* ΚΕΝΤΡΑΡΙΣΜΑ */
+    /* ΚΕΝΤΡΑΡΙΣΜΑ ΔΕΔΟΜΕΝΩΝ */
     .stDataFrame td, .stDataFrame th {
         text-align: center !important;
         vertical-align: middle !important;
@@ -39,7 +39,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.title("🩸 Medical Lab Commander")
-st.markdown("<h5 style='text-align: center;'>Έξυπνη Ανάλυση (V10)</h5>", unsafe_allow_html=True)
+st.markdown("<h5 style='text-align: center;'>V11: Human Logic & Smart Parsing</h5>", unsafe_allow_html=True)
 
 # --- 2. AUTH ---
 def get_vision_client():
@@ -51,17 +51,18 @@ def get_vision_client():
         st.error(f"Auth Error: {e}")
         return None
 
-# --- 3. CLEANING (GREEK NUMBER FIX) ---
+# --- 3. CLEANING NUMBERS (SMART) ---
 def clean_number(val_str):
     if not val_str: return None
-    # Καθαρισμός συμβόλων
+    # Καθαρισμός θορύβου
     val_str = val_str.replace('"', '').replace("'", "")
     val_str = val_str.replace('O', '0').replace('o', '0').replace('l', '1').replace('I', '1')
     val_str = val_str.replace('*', '').replace('$', '').replace('<', '').replace('>', '')
     
-    # Σημαντικό: Αφαιρούμε την τελεία (διαχωριστικό χιλιάδων στα Ελληνικά)
+    # Διαχείριση Ελληνικών δεκαδικών (4,52 -> 4.52)
+    # Αφαιρούμε την τελεία (αν είναι διαχωριστικό χιλιάδων π.χ. 1.200)
     val_str = val_str.replace('.', '') 
-    # Αντικαθιστούμε το κόμμα με τελεία (υποδιαστολή)
+    # Αλλάζουμε το κόμμα σε τελεία
     val_str = val_str.replace(',', '.')
 
     # Κρατάμε αριθμούς και τελεία
@@ -73,10 +74,10 @@ def clean_number(val_str):
         return None
 
 def find_first_number(s):
-    # Καθαρισμός γραμμής από σκουπίδια OCR
+    # Καθαρίζουμε την είσοδο
     s_clean = s.replace('"', ' ').replace("'", " ").replace(':', ' ')
     
-    # Ψάχνουμε μοτίβα αριθμών (π.χ. 4,52 ή 201)
+    # Ψάχνουμε μοτίβα αριθμών
     numbers = re.findall(r"(\d+[,.]\d+|\d+)", s_clean)
     
     for num in numbers:
@@ -85,7 +86,7 @@ def find_first_number(s):
             return cleaned
     return None
 
-# --- 4. ENGINE (DEEP SEARCH) ---
+# --- 4. ENGINE (DEEP SEARCH 5 LINES) ---
 def parse_google_text_deep(full_text, selected_metrics):
     results = {}
     lines = full_text.split('\n')
@@ -95,7 +96,7 @@ def parse_google_text_deep(full_text, selected_metrics):
         for i, line in enumerate(lines):
             line_upper = line.upper()
             
-            # Έλεγχος αν η γραμμή περιέχει κάποια από τις λέξεις-κλειδιά
+            # Έλεγχος αν η γραμμή περιέχει ΚΑΠΟΙΑ από τις λέξεις-κλειδιά (Ελληνικά ή Αγγλικά)
             if any(key.upper() in line_upper for key in keywords):
                 
                 val = None
@@ -103,7 +104,7 @@ def parse_google_text_deep(full_text, selected_metrics):
                 # 1. Ψάχνουμε στην ίδια γραμμή
                 val = find_first_number(line)
                 
-                # 2. Deep Search: Αν δεν βρούμε, ψάχνουμε 5 γραμμές κάτω
+                # 2. Αν δεν βρούμε, ψάχνουμε μέχρι 5 γραμμές κάτω (Deep Search)
                 if val is None:
                     for offset in range(1, 6): 
                         if i + offset < len(lines):
@@ -112,17 +113,18 @@ def parse_google_text_deep(full_text, selected_metrics):
                                 break
                 
                 if val is not None:
-                    # Logic Filters (για να μην πάρουμε σκουπίδια)
-                    if val > 1990 and val < 2030 and "B12" not in metric_name: continue
-                    if "PLT" in metric_name and val < 10: continue
-                    if "WBC" in metric_name and val > 100: continue
+                    # Logic Filters (Φίλτρα λογικής για αποφυγή λαθών)
+                    if val > 1990 and val < 2030 and "B12" not in metric_name: continue # Έτος
+                    if "PLT" in metric_name and val < 10: continue # Αιμοπετάλια < 10 είναι λάθος
+                    if "WBC" in metric_name and val > 100: continue # Λευκά > 100 είναι λάθος
                     if "HGB" in metric_name and val > 25: continue
+                    if "pH" in metric_name and val > 14: continue
                     
                     results[metric_name] = val
                     break 
     return results
 
-# --- 5. EXPORT ---
+# --- 5. EXPORT (PDF & EXCEL) ---
 def create_pdf_report(df, chart_image_bytes):
     pdf = FPDF()
     pdf.add_page()
@@ -186,11 +188,13 @@ def to_excel_with_chart(df, chart_fig):
 def run_statistics(df, col_x, col_y):
     clean_df = df[[col_x, col_y]].apply(pd.to_numeric, errors='coerce').dropna()
     if len(clean_df) < 3:
-        return f"⚠️ Ανεπαρκή δεδομένα ({len(clean_df)}). Απαιτούνται 3+.", None, None
+        msg = f"⚠️ Ανεπαρκή δεδομένα ({len(clean_df)}). Απαιτούνται 3+."
+        return msg, None, None
     x = clean_df[col_x]
     y = clean_df[col_y]
     if x.std() == 0 or y.std() == 0:
-        return f"⚠️ Σταθερή τιμή. Αδύνατη η στατιστική.", None, None
+        msg = f"⚠️ Σταθερή τιμή. Αδύνατη η στατιστική."
+        return msg, None, None
 
     try:
         corr, p_value = stats.pearsonr(x, y)
@@ -210,34 +214,31 @@ def run_statistics(df, col_x, col_y):
         return f"Error: {str(e)}", None, None
 
 # --- 7. ΥΒΡΙΔΙΚΟ ΛΕΞΙΚΟ (ΤΟ ΚΛΕΙΔΙ ΤΗΣ ΕΠΙΤΥΧΙΑΣ) ---
-# Συνδυάζουμε Αγγλικά (για ασφάλεια) και Ελληνικά (όπου χρειάζεται)
+# Εδώ βάλαμε ΟΛΑ τα πιθανά ονόματα (Ελληνικά & Αγγλικά) για να μην χάνει τίποτα.
 
 ALL_METRICS_DB = {
-    # ΒΑΣΙΚΑ (Αυστηρά Αγγλικά για να μην μπερδεύει Ερυθρά/Λευκά)
-    "RBC (Ερυθρά)": ["RBC"], 
-    "HGB (Αιμοσφαιρίνη)": ["HGB"],
-    "HCT (Αιματοκρίτης)": ["HCT"],
-    "PLT (Αιμοπετάλια)": ["PLT"],
-    "WBC (Λευκά)": ["WBC"],
+    # ΓΕΝΙΚΗ ΑΙΜΑΤΟΣ (Πλήρης Κάλυψη)
+    "RBC (Ερυθρά)": ["RBC", "Ερυθρά", "Ερυθρα"], 
+    "HGB (Αιμοσφαιρίνη)": ["HGB", "Αιμοσφαιρίνη", "Hb"],
+    "HCT (Αιματοκρίτης)": ["HCT", "Αιματοκρίτης"],
+    "PLT (Αιμοπετάλια)": ["PLT", "Αιμοπετάλια", "PLTS", "Platelets", "Αιμοπεταλια"], # ΤΩΡΑ ΘΑ ΤΟ ΒΡΕΙ!
+    "WBC (Λευκά)": ["WBC", "Λευκά", "Λευκα"],
     
-    # ΔΕΙΚΤΕΣ (Αγγλικά)
-    "MCV": ["MCV"],
+    "MCV": ["MCV", "Μέσος Όγκος"],
     "MCH": ["MCH"],
     "MCHC": ["MCHC"],
     "RDW": ["RDW"],
     "MPV": ["MPV"],
-    "PCT": ["PCT"],
-    "PDW": ["PDW"],
     
-    # ΤΥΠΟΣ (Υβριδικά: Τα αρχεία σου έχουν Ελληνικά εδώ)
-    "NEUT (Ουδετερόφιλα)": ["NEUT", "NE", "Ουδετερόφιλα"], 
-    "LYMPH (Λεμφοκύτταρα)": ["LYMPH", "Λεμφοκύτταρα"],
+    # ΤΥΠΟΣ ΛΕΥΚΩΝ
+    "NEUT (Ουδετερόφιλα)": ["NEUT", "NE", "Ουδετερόφιλα", "Ουδετεροφιλα"], 
+    "LYMPH (Λεμφοκύτταρα)": ["LYMPH", "Λεμφοκύτταρα", "Λεμφοκυτταρα"],
     "MONO (Μονοπύρηνα)": ["MONO", "Μονοπύρηνα"],
     "EOS (Ηωσινόφιλα)": ["EOS", "EO", "Ηωσινόφιλα"],
     "BASO (Βασέοφιλα)": ["BASO", "BA", "Βασέοφιλα"],
     
     # ΒΙΟΧΗΜΙΚΑ
-    "Σάκχαρο (GLU)": ["GLU", "GLUCOSE", "Σάκχαρο"],
+    "Σάκχαρο (GLU)": ["GLU", "GLUCOSE", "Σάκχαρο", "Σακχαρο"],
     "Ουρία": ["UREA", "Ουρία"],
     "Κρεατινίνη": ["CREATININE", "CREA", "CR", "Κρεατινίνη"],
     "Ουρικό Οξύ": ["URIC ACID", "UA", "Ουρικό"],
@@ -245,7 +246,7 @@ ALL_METRICS_DB = {
     "HDL": ["HDL"],
     "LDL": ["LDL"],
     "Τριγλυκερίδια": ["TRIGLYCERIDES", "TRIG", "Τριγλυκερίδια"],
-    "CRP": ["CRP", "Ποσοτική"],
+    "CRP": ["CRP", "Ποσοτική"], # Για το αρχείο σου
     
     # ΑΛΛΑ
     "AST (SGOT)": ["AST", "SGOT"],
@@ -268,7 +269,7 @@ st.sidebar.header("⚙️ Ρυθμίσεις")
 uploaded_files = st.sidebar.file_uploader("Upload PDF", type="pdf", accept_multiple_files=True)
 
 all_keys = list(ALL_METRICS_DB.keys())
-# Default choices (Must exist in keys)
+# Default choices (safe)
 default_choices = [
     "PLT (Αιμοπετάλια)", 
     "Σάκχαρο (GLU)", 
@@ -280,9 +281,6 @@ safe_defaults = [x for x in default_choices if x in all_keys]
 
 container = st.sidebar.container()
 select_all = st.sidebar.checkbox("Επιλογή ΟΛΩΝ")
-
-# DEBUG MODE (Για να βλέπεις τι βλέπει το πρόγραμμα)
-debug_mode = st.sidebar.checkbox("🔧 Debug Mode (Εμφάνιση Κειμένου)")
 
 if select_all:
     selected_metric_keys = container.multiselect("Εξετάσεις:", all_keys, default=all_keys)
@@ -310,10 +308,7 @@ if st.sidebar.button("🚀 ΕΝΑΡΞΗ") and uploaded_files:
                     if response.text_annotations:
                         full_text += response.text_annotations[0].description + "\n"
                 
-                if debug_mode:
-                    st.text_area(f"Raw Text for {file.name}", full_text, height=200)
-
-                # PARSER
+                # PARSER CALL
                 data = parse_google_text_deep(full_text, active_metrics_map)
                 
                 # DATE
