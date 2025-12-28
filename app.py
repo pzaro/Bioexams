@@ -39,7 +39,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.title("🩸 Medical Lab Commander")
-st.markdown("<h5 style='text-align: center;'>Strict English Acronyms Mode</h5>", unsafe_allow_html=True)
+st.markdown("<h5 style='text-align: center;'>Έξυπνη Ανάλυση (V10)</h5>", unsafe_allow_html=True)
 
 # --- 2. AUTH ---
 def get_vision_client():
@@ -51,16 +51,17 @@ def get_vision_client():
         st.error(f"Auth Error: {e}")
         return None
 
-# --- 3. CLEANING ---
+# --- 3. CLEANING (GREEK NUMBER FIX) ---
 def clean_number(val_str):
     if not val_str: return None
     # Καθαρισμός συμβόλων
     val_str = val_str.replace('"', '').replace("'", "")
     val_str = val_str.replace('O', '0').replace('o', '0').replace('l', '1').replace('I', '1')
     val_str = val_str.replace('*', '').replace('$', '').replace('<', '').replace('>', '')
-    val_str = val_str.replace('H', '').replace('L', '') 
     
-    # Αντικατάσταση κόμματος με τελεία
+    # Σημαντικό: Αφαιρούμε την τελεία (διαχωριστικό χιλιάδων στα Ελληνικά)
+    val_str = val_str.replace('.', '') 
+    # Αντικαθιστούμε το κόμμα με τελεία (υποδιαστολή)
     val_str = val_str.replace(',', '.')
 
     # Κρατάμε αριθμούς και τελεία
@@ -72,10 +73,10 @@ def clean_number(val_str):
         return None
 
 def find_first_number(s):
-    # Καθαρίζουμε πρώτα τα εισαγωγικά και άνω κάτω τελείες
+    # Καθαρισμός γραμμής από σκουπίδια OCR
     s_clean = s.replace('"', ' ').replace("'", " ").replace(':', ' ')
     
-    # Ψάχνουμε μοτίβα αριθμών
+    # Ψάχνουμε μοτίβα αριθμών (π.χ. 4,52 ή 201)
     numbers = re.findall(r"(\d+[,.]\d+|\d+)", s_clean)
     
     for num in numbers:
@@ -92,34 +93,30 @@ def parse_google_text_deep(full_text, selected_metrics):
 
     for metric_name, keywords in selected_metrics.items():
         for i, line in enumerate(lines):
-            # ΑΥΣΤΗΡΗ ΑΝΑΖΗΤΗΣΗ (μόνο τα αγγλικά ακρώνυμα)
-            # Χρησιμοποιούμε split() για να βρούμε τη λέξη "σκέτη" αν γίνεται, 
-            # αλλά το 'in' είναι πιο ασφαλές για κολλημένες λέξεις.
             line_upper = line.upper()
             
-            # Αν βρεθεί το ακρώνυμο (π.χ. "RBC")
+            # Έλεγχος αν η γραμμή περιέχει κάποια από τις λέξεις-κλειδιά
             if any(key.upper() in line_upper for key in keywords):
                 
                 val = None
                 
-                # 1. Ίδια γραμμή
+                # 1. Ψάχνουμε στην ίδια γραμμή
                 val = find_first_number(line)
                 
-                # 2. Deep Search (5 γραμμές κάτω)
+                # 2. Deep Search: Αν δεν βρούμε, ψάχνουμε 5 γραμμές κάτω
                 if val is None:
-                    for offset in range(1, 6):
+                    for offset in range(1, 6): 
                         if i + offset < len(lines):
                             val = find_first_number(lines[i + offset])
                             if val is not None:
                                 break
                 
                 if val is not None:
-                    # Logic Filters
+                    # Logic Filters (για να μην πάρουμε σκουπίδια)
                     if val > 1990 and val < 2030 and "B12" not in metric_name: continue
                     if "PLT" in metric_name and val < 10: continue
                     if "WBC" in metric_name and val > 100: continue
                     if "HGB" in metric_name and val > 25: continue
-                    if "pH" in metric_name and val > 14: continue
                     
                     results[metric_name] = val
                     break 
@@ -188,15 +185,12 @@ def to_excel_with_chart(df, chart_fig):
 # --- 6. STATISTICS ---
 def run_statistics(df, col_x, col_y):
     clean_df = df[[col_x, col_y]].apply(pd.to_numeric, errors='coerce').dropna()
-    
     if len(clean_df) < 3:
-        msg = f"⚠️ Ανεπαρκή δεδομένα ({len(clean_df)}). Απαιτούνται 3+."
-        return msg, None, None
+        return f"⚠️ Ανεπαρκή δεδομένα ({len(clean_df)}). Απαιτούνται 3+.", None, None
     x = clean_df[col_x]
     y = clean_df[col_y]
     if x.std() == 0 or y.std() == 0:
-        msg = f"⚠️ Σταθερή τιμή. Αδύνατη η στατιστική."
-        return msg, None, None
+        return f"⚠️ Σταθερή τιμή. Αδύνατη η στατιστική.", None, None
 
     try:
         corr, p_value = stats.pearsonr(x, y)
@@ -215,17 +209,18 @@ def run_statistics(df, col_x, col_y):
     except Exception as e:
         return f"Error: {str(e)}", None, None
 
-# --- 7. DATABASE (ONLY ENGLISH ACRONYMS) ---
-# Εδώ άλλαξαν όλα. ΜΟΝΟ αγγλικά κλειδιά για να μην μπερδεύεται τίποτα.
+# --- 7. ΥΒΡΙΔΙΚΟ ΛΕΞΙΚΟ (ΤΟ ΚΛΕΙΔΙ ΤΗΣ ΕΠΙΤΥΧΙΑΣ) ---
+# Συνδυάζουμε Αγγλικά (για ασφάλεια) και Ελληνικά (όπου χρειάζεται)
 
 ALL_METRICS_DB = {
-    # CBC (Γενική Αίματος)
+    # ΒΑΣΙΚΑ (Αυστηρά Αγγλικά για να μην μπερδεύει Ερυθρά/Λευκά)
     "RBC (Ερυθρά)": ["RBC"], 
     "HGB (Αιμοσφαιρίνη)": ["HGB"],
     "HCT (Αιματοκρίτης)": ["HCT"],
     "PLT (Αιμοπετάλια)": ["PLT"],
     "WBC (Λευκά)": ["WBC"],
     
+    # ΔΕΙΚΤΕΣ (Αγγλικά)
     "MCV": ["MCV"],
     "MCH": ["MCH"],
     "MCHC": ["MCHC"],
@@ -234,41 +229,34 @@ ALL_METRICS_DB = {
     "PCT": ["PCT"],
     "PDW": ["PDW"],
     
-    # WBC Diff (Τύπος) - Βάλαμε και τα σύντομα (NE, EO, BA) που είδαμε στο PDF σου
-    "NEUT (Ουδετερόφιλα)": ["NEUT", "NE"], 
-    "LYMPH (Λεμφοκύτταρα)": ["LYMPH"],
-    "MONO (Μονοπύρηνα)": ["MONO"],
-    "EOS (Ηωσινόφιλα)": ["EOS", "EO"],
-    "BASO (Βασέοφιλα)": ["BASO", "BA"],
+    # ΤΥΠΟΣ (Υβριδικά: Τα αρχεία σου έχουν Ελληνικά εδώ)
+    "NEUT (Ουδετερόφιλα)": ["NEUT", "NE", "Ουδετερόφιλα"], 
+    "LYMPH (Λεμφοκύτταρα)": ["LYMPH", "Λεμφοκύτταρα"],
+    "MONO (Μονοπύρηνα)": ["MONO", "Μονοπύρηνα"],
+    "EOS (Ηωσινόφιλα)": ["EOS", "EO", "Ηωσινόφιλα"],
+    "BASO (Βασέοφιλα)": ["BASO", "BA", "Βασέοφιλα"],
     
-    # BIOCHEM (Βιοχημικά)
-    "GLU (Σάκχαρο)": ["GLU", "GLUCOSE"],
-    "UREA (Ουρία)": ["UREA"],
-    "CREA (Κρεατινίνη)": ["CREATININE", "CREA", "CR"],
-    "UA (Ουρικό Οξύ)": ["URIC ACID", "UA"],
-    "CHOL (Χοληστερίνη)": ["CHOLESTEROL", "CHOL"],
+    # ΒΙΟΧΗΜΙΚΑ
+    "Σάκχαρο (GLU)": ["GLU", "GLUCOSE", "Σάκχαρο"],
+    "Ουρία": ["UREA", "Ουρία"],
+    "Κρεατινίνη": ["CREATININE", "CREA", "CR", "Κρεατινίνη"],
+    "Ουρικό Οξύ": ["URIC ACID", "UA", "Ουρικό"],
+    "Χοληστερίνη": ["CHOLESTEROL", "CHOL", "Χοληστερίνη"],
     "HDL": ["HDL"],
     "LDL": ["LDL"],
-    "TRIG (Τριγλυκερίδια)": ["TRIGLYCERIDES", "TRIG"],
-    "CRP": ["CRP"],
+    "Τριγλυκερίδια": ["TRIGLYCERIDES", "TRIG", "Τριγλυκερίδια"],
+    "CRP": ["CRP", "Ποσοτική"],
     
-    # LIVER/ENZYMES
+    # ΑΛΛΑ
     "AST (SGOT)": ["AST", "SGOT"],
     "ALT (SGPT)": ["ALT", "SGPT"],
-    "GGT (γ-GT)": ["GGT"],
-    "ALP": ["ALP"],
-    "FE (Σίδηρος)": ["FE ", "IRON"], # Fe με κενό
-    "FERR (Φερριτίνη)": ["FERRITIN"],
+    "GGT": ["GGT", "γ-GT"],
+    "Σίδηρος (Fe)": ["FE ", "IRON", "Σίδηρος"],
+    "Φερριτίνη": ["FERRITIN", "Φερριτίνη"],
     "B12": ["B12"],
-    "FOLIC (Φυλλικό)": ["FOLIC"],
-    "VIT D (Βιταμίνη D)": ["VIT D", "D3", "25-OH"],
-    
-    # THYROID / OTHER
+    "Φυλλικό Οξύ": ["FOLIC", "Φυλλικό"],
+    "Βιταμίνη D3": ["VIT D", "D3", "25-OH"],
     "TSH": ["TSH"],
-    "T3": ["T3"],
-    "T4": ["T4"],
-    "FT3": ["FT3"],
-    "FT4": ["FT4"],
     "PSA": ["PSA"]
 }
 
@@ -280,25 +268,26 @@ st.sidebar.header("⚙️ Ρυθμίσεις")
 uploaded_files = st.sidebar.file_uploader("Upload PDF", type="pdf", accept_multiple_files=True)
 
 all_keys = list(ALL_METRICS_DB.keys())
-
-# Default values must match dictionary keys exactly
+# Default choices (Must exist in keys)
 default_choices = [
     "PLT (Αιμοπετάλια)", 
-    "GLU (Σάκχαρο)", 
-    "CHOL (Χοληστερίνη)",
+    "Σάκχαρο (GLU)", 
+    "Χοληστερίνη",
     "RBC (Ερυθρά)", 
     "WBC (Λευκά)"
 ]
-# Safety check
 safe_defaults = [x for x in default_choices if x in all_keys]
 
 container = st.sidebar.container()
 select_all = st.sidebar.checkbox("Επιλογή ΟΛΩΝ")
 
+# DEBUG MODE (Για να βλέπεις τι βλέπει το πρόγραμμα)
+debug_mode = st.sidebar.checkbox("🔧 Debug Mode (Εμφάνιση Κειμένου)")
+
 if select_all:
-    selected_metric_keys = container.multiselect("Εξετάσεις (Acronyms Only):", all_keys, default=all_keys)
+    selected_metric_keys = container.multiselect("Εξετάσεις:", all_keys, default=all_keys)
 else:
-    selected_metric_keys = container.multiselect("Εξετάσεις (Acronyms Only):", all_keys, default=safe_defaults)
+    selected_metric_keys = container.multiselect("Εξετάσεις:", all_keys, default=safe_defaults)
 
 active_metrics_map = {k: ALL_METRICS_DB[k] for k in selected_metric_keys}
 
@@ -321,7 +310,10 @@ if st.sidebar.button("🚀 ΕΝΑΡΞΗ") and uploaded_files:
                     if response.text_annotations:
                         full_text += response.text_annotations[0].description + "\n"
                 
-                # CALL PARSER
+                if debug_mode:
+                    st.text_area(f"Raw Text for {file.name}", full_text, height=200)
+
+                # PARSER
                 data = parse_google_text_deep(full_text, active_metrics_map)
                 
                 # DATE
