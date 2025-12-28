@@ -5,7 +5,7 @@ pdf2image
 pandas
 scipy
 statsmodels
-fpdf
+fpdf2
 plotly
 kaleido
 Pillow
