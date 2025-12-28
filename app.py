@@ -54,11 +54,16 @@ def get_vision_client():
 # --- 3. CLEANING ---
 def clean_number(val_str):
     if not val_str: return None
-    val_str = val_str.replace('"', '').replace("'", "").replace(",", ".") 
+    # Αφαίρεση θορύβου (εισαγωγικά, σύμβολα)
+    val_str = val_str.replace('"', '').replace("'", "")
     val_str = val_str.replace('O', '0').replace('o', '0').replace('l', '1').replace('I', '1')
     val_str = val_str.replace('*', '').replace('$', '').replace('<', '').replace('>', '')
     val_str = val_str.replace('H', '').replace('L', '') 
     
+    # Αντικατάσταση κόμματος με τελεία ΜΟΝΟ αν είναι δεκαδικό
+    val_str = val_str.replace(',', '.')
+
+    # Κρατάμε αριθμούς και τελεία
     clean = re.sub(r"[^0-9.]", "", val_str)
     
     try:
@@ -67,12 +72,15 @@ def clean_number(val_str):
         return None
 
 def find_first_number(s):
-    s_clean = s.replace('"', ' ').replace("'", " ")
+    # Καθαρίζουμε πρώτα τα εισαγωγικά για να μην κολλάνε οι αριθμοί
+    s_clean = s.replace('"', ' ').replace("'", " ").replace(':', ' ')
+    
+    # Ψάχνουμε μοτίβα αριθμών (π.χ. 4.38 ή 4,38 ή 106)
     numbers = re.findall(r"(\d+[,.]\d+|\d+)", s_clean)
     
     for num in numbers:
-        num_fixed = num.replace(',', '.')
-        cleaned = clean_number(num_fixed)
+        # Δοκιμή καθαρισμού
+        cleaned = clean_number(num)
         if cleaned is not None:
             return cleaned
     return None
@@ -85,25 +93,32 @@ def parse_google_text_deep(full_text, selected_metrics):
 
     for metric_name, keywords in selected_metrics.items():
         for i, line in enumerate(lines):
-            if any(key.upper() in line.upper() for key in keywords):
+            # Normalization: Κάνουμε τα πάντα UPPER CASE για σύγκριση
+            line_upper = line.upper()
+            
+            # Αν βρεθεί ΚΑΠΟΙΑ από τις λέξεις κλειδιά
+            if any(key.upper() in line_upper for key in keywords):
                 
                 val = None
+                
+                # 1. Ψάχνουμε στην ίδια γραμμή
                 val = find_first_number(line)
                 
+                # 2. Deep Search: Ψάχνουμε μέχρι και 5 γραμμές από κάτω
                 if val is None:
-                    # Ψάχνουμε μέχρι 5 γραμμές κάτω
-                    for offset in range(1, 6):
+                    for offset in range(1, 6): # i+1 έως i+5
                         if i + offset < len(lines):
                             val = find_first_number(lines[i + offset])
                             if val is not None:
                                 break
                 
                 if val is not None:
-                    # Φίλτρα
+                    # --- Logic Filters (Για να μην πιάνει ημερομηνίες/κωδικούς) ---
                     if val > 1990 and val < 2030 and "B12" not in metric_name: continue
                     if "PLT" in metric_name and val < 10: continue
                     if "WBC" in metric_name and val > 100: continue
                     if "HGB" in metric_name and val > 25: continue
+                    if "pH" in metric_name and val > 14: continue
                     
                     results[metric_name] = val
                     break 
@@ -145,7 +160,6 @@ def create_pdf_report(df, chart_image_bytes):
         with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp_file:
             tmp_file.write(chart_image_bytes)
             tmp_path = tmp_file.name
-        
         try:
             pdf.image(tmp_path, x=10, w=190)
         except:
@@ -184,7 +198,7 @@ def run_statistics(df, col_x, col_y):
     y = clean_df[col_y]
     
     if x.std() == 0 or y.std() == 0:
-        msg = f"⚠️ Σταθερή τιμή σε μια μεταβλητή. Αδύνατη η στατιστική."
+        msg = f"⚠️ Σταθερή τιμή. Αδύνατη η στατιστική."
         return msg, None, None
 
     try:
@@ -204,54 +218,53 @@ def run_statistics(df, col_x, col_y):
     except Exception as e:
         return f"Error: {str(e)}", None, None
 
-# --- 7. DATABASE & APP ---
-
-# Η ΠΛΗΡΗΣ ΛΙΣΤΑ (ΤΩΡΑ ΜΕ ΒΙΤΑΜΙΝΗ D)
+# --- 7. UPDATED DATABASE (ΜΕ ΒΑΣΗ ΤΑ ΑΡΧΕΙΑ ΣΟΥ) ---
 ALL_METRICS_DB = {
-    # Γενική
-    "Ερυθρά (RBC)": ["RBC", "Ερυθρά"],
-    "Αιμοσφαιρίνη (HGB)": ["HGB", "Αιμοσφαιρίνη"],
-    "Αιματοκρίτης (HCT)": ["HCT", "Αιματοκρίτης"],
-    "Αιμοπετάλια (PLT)": ["PLT", "Αιμοπετάλια"],
-    "Λευκά (WBC)": ["WBC", "Λευκά"],
-    "MCV": ["MCV", "Μέσος Όγκος"],
-    "MCH": ["MCH"],
-    "MCHC": ["MCHC"],
-    "RDW": ["RDW"],
-    "MPV": ["MPV"],
+    # ΓΕΝΙΚΗ ΑΙΜΑΤΟΣ (ΔΙΟΡΘΩΜΕΝΑ)
+    "Ερυθρά (RBC)": ["RBC", "Ερυθρά", "Ερυθρα Αιμοσφαιρια"],
+    "Αιμοσφαιρίνη (HGB)": ["HGB", "Αιμοσφαιρίνη", "Αιμοσφαιρινη"],
+    "Αιματοκρίτης (HCT)": ["HCT", "Αιματοκρίτης", "Αιματοκριτης"],
+    "Αιμοπετάλια (PLT)": ["PLT", "Αιμοπετάλια", "Αιμοπεταλια"],
+    "Λευκά (WBC)": ["WBC", "Λευκά", "Λευκα Αιμοσφαιρια"],
+    
+    "MCV": ["MCV", "Μέσος Όγκος", "Μεσος Ογκος"], # Χωρίς τόνο
+    "MCH": ["MCH", "Μέση Περιεκτ", "Μεση Περιεκτ"],
+    "MCHC": ["MCHC", "Μέση Πυκν", "Μεση Πυκν"],
+    "RDW": ["RDW", "Εύρος κατανομής"],
+    "MPV": ["MPV", "Μέσος Όγκος Αιμοπεταλίων"],
     "PCT": ["PCT", "Αιμοπεταλιοκρίτης"],
     "PDW": ["PDW"],
-    "Ουδετερόφιλα %": ["NEUT", "Ουδετερόφιλα", "NE "],
+    
+    # ΤΥΠΟΣ
+    "Ουδετερόφιλα %": ["NEUT", "Ουδετερόφιλα", "NE", "ΝΕ"], # Ελληνικό και Λατινικό NE
     "Λεμφοκύτταρα %": ["LYMPH", "Λεμφοκύτταρα"],
     "Μονοπύρηνα %": ["MONO", "Μονοπύρηνα"],
-    "Ηωσινόφιλα %": ["EOS", "Ηωσινόφιλα"],
-    "Βασέοφιλα %": ["BASO", "Βασέοφιλα"],
+    "Ηωσινόφιλα %": ["EOS", "Ηωσινόφιλα", "ΕΟ"],
+    "Βασέοφιλα %": ["BASO", "Βασέοφιλα", "ΒΑ"],
     
-    # Βιοχημικά
+    # ΒΙΟΧΗΜΙΚΑ
     "Σάκχαρο (GLU)": ["GLU", "Σάκχαρο", "Glucose"],
-    "Ουρία": ["Urea", "Ουρία"],
+    "Ουρία": ["Urea", "Ουρία", "Ουρια"],
     "Κρεατινίνη": ["Creatinine", "Κρεατινίνη"],
     "Ουρικό Οξύ": ["Uric Acid", "Ουρικό"],
     "Χοληστερίνη Ολική": ["Cholesterol", "Χοληστερίνη"],
     "HDL": ["HDL"],
     "LDL": ["LDL"],
     "Τριγλυκερίδια": ["Triglycerides", "Τριγλυκερίδια"],
-    "SGOT (AST)": ["SGOT", "AST"],
-    "SGPT (ALT)": ["SGPT", "ALT"],
+    "CRP": ["CRP", "Ποσοτική"], # Από το αρχείο σου
+    
+    # ΕΝΖΥΜΑ & ΗΠΑΤΙΚΑ
+    "SGOT (AST)": ["SGOT", "AST", "ΑΣΤ"],
+    "SGPT (ALT)": ["SGPT", "ALT", "ΑΛΤ"],
     "γ-GT": ["GGT", "γ-GT", "γGT"],
     "ALP": ["ALP", "Αλκαλική"],
     "Σίδηρος (Fe)": ["Fe ", "Σίδηρος"],
     "Φερριτίνη": ["Ferritin", "Φερριτίνη"],
     "B12": ["B12"],
     
-    # --- ΕΔΩ ΕΙΝΑΙ Η D ---
     "Βιταμίνη D3": ["Vit D", "D3", "25-OH"],
     "Φυλλικό Οξύ": ["Folic", "Φυλλικό"],
-    
     "TSH": ["TSH"],
-    "T3": ["T3 "],
-    "T4": ["T4 "],
-    "CRP": ["CRP"],
     "PSA": ["PSA"]
 }
 
@@ -263,15 +276,9 @@ st.sidebar.header("⚙️ Ρυθμίσεις")
 uploaded_files = st.sidebar.file_uploader("Upload PDF", type="pdf", accept_multiple_files=True)
 
 all_keys = list(ALL_METRICS_DB.keys())
-
-# Default values που ταιριάζουν ΑΚΡΙΒΩΣ στη λίστα
-default_choices = [
-    "Αιμοπετάλια (PLT)", 
-    "Σάκχαρο (GLU)", 
-    "Χοληστερίνη Ολική",
-    "Ερυθρά (RBC)", 
-    "Λευκά (WBC)"
-]
+# Default values must exist in keys
+default_choices = ["Αιμοπετάλια (PLT)", "Σάκχαρο (GLU)", "Χοληστερίνη Ολική", "Ερυθρά (RBC)", "Λευκά (WBC)"]
+safe_defaults = [x for x in default_choices if x in all_keys]
 
 container = st.sidebar.container()
 select_all = st.sidebar.checkbox("Επιλογή ΟΛΩΝ")
@@ -279,7 +286,7 @@ select_all = st.sidebar.checkbox("Επιλογή ΟΛΩΝ")
 if select_all:
     selected_metric_keys = container.multiselect("Εξετάσεις:", all_keys, default=all_keys)
 else:
-    selected_metric_keys = container.multiselect("Εξετάσεις:", all_keys, default=default_choices)
+    selected_metric_keys = container.multiselect("Εξετάσεις:", all_keys, default=safe_defaults)
 
 active_metrics_map = {k: ALL_METRICS_DB[k] for k in selected_metric_keys}
 
@@ -336,11 +343,9 @@ if st.session_state.df_master is not None:
     display_df = final_df.copy()
     display_df['Date'] = display_df['Date'].dt.strftime('%d/%m/%Y')
 
-    # 1. TABLE
     st.subheader("📋 Αποτελέσματα")
     st.dataframe(display_df, use_container_width=True)
 
-    # 2. CHART
     st.subheader("📈 Γράφημα")
     if len(cols) > 2:
         plot_df = final_df.melt(id_vars=['Date', 'Αρχείο'], var_name='Metric', value_name='Value').dropna()
@@ -351,7 +356,6 @@ if st.session_state.df_master is not None:
         fig = None
         st.info("Επίλεξε εξετάσεις για γράφημα.")
 
-    # 3. STATS
     st.divider()
     st.subheader("🧮 Στατιστικά")
     stat_cols = [c for c in cols if c not in ['Date', 'Αρχείο']]
@@ -369,7 +373,6 @@ if st.session_state.df_master is not None:
                 fig_r = px.scatter(c_dat, x=x_ax, y=y_ax, trendline="ols", title=f"{x_ax} vs {y_ax}")
                 st.plotly_chart(fig_r, use_container_width=True)
 
-    # 4. EXPORT
     st.divider()
     st.subheader("📥 Λήψη")
     ec1, ec2 = st.columns(2)
