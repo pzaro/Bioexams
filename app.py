@@ -1,12 +1,16 @@
 # ============================================================
-# Medical Lab Commander — V19 (Streamlit Cloud-ready)
+# Medical Lab Commander — V20 (Streamlit Cloud-ready)
 # Strict-only extraction (NO auto extract)
 # - OCR via Google Vision (document_text_detection)
 # - Robust keyword matching (handles R B C / R.B.C etc.)
 # - Robust value picking (prevents WBC=percent mistakes)
 # - Defaults: ONLY PLT (Αιμοπετάλια)
 # - PDF Print: Table + Chart
-#   * PDF Unicode-safe (Greek) via fpdf2 + DejaVu fonts in repo
+#   * Greek-safe PDF via fpdf2 + DejaVu fonts (supports:
+#       - BASE_DIR/Fonts/DejaVuSans.ttf  (your current structure)
+#       - BASE_DIR/fonts/DejaVuSans.ttf
+#       - BASE_DIR/DejaVuSans.ttf
+#     same for Bold
 #   * Chart embedded via Plotly -> PNG (requires kaleido)
 # - Stats: Pearson correlation + theory explanation
 # ============================================================
@@ -40,7 +44,7 @@ h1, h2, h3 { text-align: center; }
 """, unsafe_allow_html=True)
 
 st.title("🩸 Medical Lab Commander")
-st.markdown("<h5 style='text-align: center;'>V19: Strict Only + Greek PDF + Chart in PDF</h5>", unsafe_allow_html=True)
+st.markdown("<h5 style='text-align: center;'>V20: Strict Only + Greek PDF + Chart in PDF</h5>", unsafe_allow_html=True)
 
 # -------------------------
 # 2) AUTH (GCP Vision)
@@ -299,7 +303,7 @@ def extract_date_from_text_or_filename(full_text: str, filename: str):
 # -------------------------
 # 9) PLOTLY CHART -> PNG (needs kaleido)
 # -------------------------
-def build_plotly_chart(final_df: pd.DataFrame, metric_cols: list[str]):
+def build_plotly_chart(final_df: pd.DataFrame):
     plot_df = final_df.melt(id_vars=["Date", "Αρχείο"], var_name="Metric", value_name="Value").dropna()
     if plot_df.empty:
         return None
@@ -316,28 +320,64 @@ def plotly_to_png_bytes(fig) -> bytes | None:
         return None
 
 # -------------------------
-# 10) PDF (Greek-safe via fpdf2 + DejaVu fonts)
+# 10) FONT RESOLUTION (supports Bioexams/Fonts/)
+# -------------------------
+def resolve_font_paths() -> tuple[str, str | None]:
+    """
+    Returns (regular_font_path, bold_font_path_or_None)
+    Supports these locations (relative to app.py folder):
+      1) BASE_DIR/Fonts/DejaVuSans.ttf
+      2) BASE_DIR/fonts/DejaVuSans.ttf
+      3) BASE_DIR/DejaVuSans.ttf
+    """
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+
+    candidates = [
+        (os.path.join(base_dir, "Fonts", "DejaVuSans.ttf"),
+         os.path.join(base_dir, "Fonts", "DejaVuSans-Bold.ttf")),
+
+        (os.path.join(base_dir, "fonts", "DejaVuSans.ttf"),
+         os.path.join(base_dir, "fonts", "DejaVuSans-Bold.ttf")),
+
+        (os.path.join(base_dir, "DejaVuSans.ttf"),
+         os.path.join(base_dir, "DejaVuSans-Bold.ttf")),
+    ]
+
+    regular = None
+    bold = None
+    for fr, fb in candidates:
+        if os.path.exists(fr):
+            regular = fr
+            bold = fb if os.path.exists(fb) else None
+            break
+
+    if not regular:
+        raise FileNotFoundError(
+            "Δεν βρέθηκε το DejaVuSans.ttf. Βεβαιώσου ότι υπάρχει σε ένα από τα:\n"
+            "- Bioexams/Fonts/DejaVuSans.ttf\n"
+            "- fonts/DejaVuSans.ttf\n"
+            "- root δίπλα στο app.py\n"
+            "και ότι το όνομα αρχείου είναι ακριβώς με σωστά κεφαλαία/μικρά."
+        )
+
+    return regular, bold
+
+# -------------------------
+# 11) PDF (Greek-safe via fpdf2 + DejaVu fonts)
 # -------------------------
 def create_print_pdf(display_df: pd.DataFrame, chart_png_bytes: bytes | None):
     """
     Requires:
       - fpdf2 installed (requirements.txt -> fpdf2)
-      - fonts uploaded into repo:
-          fonts/DejaVuSans.ttf
-          fonts/DejaVuSans-Bold.ttf (optional)
+      - DejaVu fonts present (your case: BASE_DIR/Fonts/)
     """
     pdf = FPDF(orientation="P", unit="mm", format="A4")
     pdf.set_auto_page_break(auto=True, margin=12)
 
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    font_regular = os.path.join(base_dir, "fonts", "DejaVuSans.ttf")
-    font_bold = os.path.join(base_dir, "fonts", "DejaVuSans-Bold.ttf")
-
-    if not os.path.exists(font_regular):
-        raise FileNotFoundError(f"Missing font file: {font_regular}")
+    font_regular, font_bold = resolve_font_paths()
 
     pdf.add_font("DejaVu", "", font_regular, uni=True)
-    has_bold = os.path.exists(font_bold)
+    has_bold = font_bold is not None
     if has_bold:
         pdf.add_font("DejaVu", "B", font_bold, uni=True)
 
@@ -350,7 +390,6 @@ def create_print_pdf(display_df: pd.DataFrame, chart_png_bytes: bytes | None):
     pdf.set_font("DejaVu", "B" if has_bold else "", 9)
     cols = list(display_df.columns)
 
-    # widths: Date small, File medium, metrics
     col_widths = []
     for c in cols:
         if str(c).lower() == "date":
@@ -365,6 +404,7 @@ def create_print_pdf(display_df: pd.DataFrame, chart_png_bytes: bytes | None):
         pdf.cell(w, 8, str(c)[:25], border=1, align="C")
     pdf.ln()
 
+    # rows
     pdf.set_font("DejaVu", "", 9)
     for _, row in display_df.iterrows():
         for c, w in zip(cols, col_widths):
@@ -395,7 +435,7 @@ def create_print_pdf(display_df: pd.DataFrame, chart_png_bytes: bytes | None):
     return pdf.output(dest="S").encode("latin-1")
 
 # -------------------------
-# 11) STATS (Pearson) + THEORY
+# 12) STATS (Pearson) + THEORY
 # -------------------------
 def stats_method_explanation():
     return """
@@ -435,7 +475,7 @@ def run_statistics_pearson(df, col_x, col_y):
     return {"N": len(clean_df), "Pearson r": corr, "p-value": p_value}, clean_df
 
 # -------------------------
-# 12) METRICS DB (extend as needed)
+# 13) METRICS DB (extend as needed)
 # -------------------------
 ALL_METRICS_DB = {
     "PLT (Αιμοπετάλια)": ["PLT", "Platelets", "Αιμοπετάλια"],
@@ -455,7 +495,7 @@ ALL_METRICS_DB = {
 }
 
 # -------------------------
-# 13) SESSION STATE
+# 14) SESSION STATE
 # -------------------------
 if "df_master" not in st.session_state:
     st.session_state.df_master = None
@@ -463,7 +503,7 @@ if "debug_master" not in st.session_state:
     st.session_state.debug_master = None
 
 # -------------------------
-# 14) SIDEBAR
+# 15) SIDEBAR
 # -------------------------
 st.sidebar.header("⚙️ Ρυθμίσεις")
 uploaded_files = st.sidebar.file_uploader("Ανέβασε PDF", type="pdf", accept_multiple_files=True)
@@ -481,15 +521,18 @@ selected_metric_keys = st.sidebar.multiselect(
 )
 active_metrics_map = {k: ALL_METRICS_DB[k] for k in selected_metric_keys}
 
-# Optional: quick environment checks (remove later)
+# Diagnostics expander (you can remove after stabilizing)
 with st.sidebar.expander("🔎 Diagnostics (optional)"):
     base_dir = os.path.dirname(os.path.abspath(__file__))
-    st.write("fonts/ exists:", os.path.exists(os.path.join(base_dir, "fonts")))
-    st.write("DejaVuSans.ttf:", os.path.exists(os.path.join(base_dir, "fonts", "DejaVuSans.ttf")))
-    st.write("DejaVuSans-Bold.ttf:", os.path.exists(os.path.join(base_dir, "fonts", "DejaVuSans-Bold.ttf")))
+    st.write("BASE_DIR:", base_dir)
+    st.write("Exists BASE_DIR/Fonts:", os.path.exists(os.path.join(base_dir, "Fonts")))
+    st.write("Exists BASE_DIR/Fonts/DejaVuSans.ttf:", os.path.exists(os.path.join(base_dir, "Fonts", "DejaVuSans.ttf")))
+    st.write("Exists BASE_DIR/fonts:", os.path.exists(os.path.join(base_dir, "fonts")))
+    st.write("Exists BASE_DIR/fonts/DejaVuSans.ttf:", os.path.exists(os.path.join(base_dir, "fonts", "DejaVuSans.ttf")))
+    st.write("Exists BASE_DIR/DejaVuSans.ttf:", os.path.exists(os.path.join(base_dir, "DejaVuSans.ttf")))
 
 # -------------------------
-# 15) RUN EXTRACTION
+# 16) RUN EXTRACTION
 # -------------------------
 if st.sidebar.button("🚀 START") and uploaded_files:
     client = get_vision_client()
@@ -534,7 +577,7 @@ if st.sidebar.button("🚀 START") and uploaded_files:
         st.session_state.debug_master = None
 
 # -------------------------
-# 16) DASHBOARD
+# 17) DASHBOARD
 # -------------------------
 if st.session_state.df_master is not None:
     df = st.session_state.df_master.copy()
@@ -568,7 +611,7 @@ if st.session_state.df_master is not None:
     chart_png = None
 
     if metric_cols:
-        fig = build_plotly_chart(final_df, metric_cols)
+        fig = build_plotly_chart(final_df)
         if fig is not None:
             st.plotly_chart(fig, use_container_width=True)
             chart_png = plotly_to_png_bytes(fig)
@@ -594,8 +637,10 @@ if st.session_state.df_master is not None:
     except Exception as e:
         st.error(f"PDF Error: {e}")
         st.info(
-            "Έλεγξε ότι έχεις στο requirements.txt το fpdf2 και ότι υπάρχουν τα fonts στο repo: "
-            "fonts/DejaVuSans.ttf (+ προαιρετικά DejaVuSans-Bold.ttf)."
+            "Έλεγξε:\n"
+            "1) requirements.txt: fpdf2, plotly, kaleido\n"
+            "2) Fonts: Bioexams/Fonts/DejaVuSans.ttf (ή fonts/ ή root)\n"
+            "3) Ονόματα αρχείων με σωστά κεφαλαία/μικρά."
         )
 
     st.divider()
